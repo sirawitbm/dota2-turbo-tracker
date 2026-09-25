@@ -96,6 +96,64 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.pending_modes()), 2)
 
 
+class BuildTests(unittest.TestCase):
+    ITEMS = {
+        "1": {"key": "blink", "name": "Blink Dagger", "cost": 2250,
+              "qual": "component", "img": "", "components": []},
+        "44": {"key": "tango", "name": "Tango", "cost": 90,
+               "qual": "consumable", "img": "", "components": []},
+        "29": {"key": "boots", "name": "Boots of Speed", "cost": 500,
+               "qual": "component", "img": "", "components": []},
+        "2": {"key": "ogre_axe", "name": "Ogre Axe", "cost": 1000,
+              "qual": "component", "img": "", "components": []},
+        "108": {"key": "ultimate_scepter", "name": "Aghanim's Scepter",
+                "cost": 4200, "qual": "rare", "img": "",
+                "components": ["ogre_axe"]},
+        "13": {"key": "recipe_x", "name": "Recipe", "cost": 500,
+               "qual": None, "img": "", "components": []},
+        "36": {"key": "magic_wand", "name": "Magic Wand", "cost": 460,
+               "qual": "common", "img": "", "components": []},
+    }
+    POP = {"start_game_items": {"44": 90, "29": 10},
+           "early_game_items": {"29": 50, "36": 40, "13": 30},
+           "mid_game_items": {"2": 60, "1": 50, "36": 40, "108": 30},
+           "late_game_items": {"108": 20, "1": 10}}
+
+    def test_stages_squeezed_for_turbo(self):
+        from builds import STAGES, stage_for
+        names = [STAGES[stage_for(c)][0] for c in (-60, 0, 299, 300, 719, 720)]
+        self.assertEqual(names, ["start", "early", "early", "mid", "mid", "late"])
+
+    def test_filters_and_owned(self):
+        from builds import recommend
+        rec = recommend(self.POP, self.ITEMS, 400, {"blink"})
+        now = [(i["key"], i["owned"]) for i in rec["now"]]
+        # Ogre Axe hidden (its Scepter is popular), Magic Wand too cheap
+        # for mid game, owned Blink ticked.
+        self.assertEqual(now, [("blink", True), ("ultimate_scepter", False)])
+        self.assertEqual(rec["next_stage"], "Late game")
+        # nothing new in late that isn't already shown/owned
+        self.assertEqual(rec["next"], [])
+        early = recommend(self.POP, self.ITEMS, 60, set())
+        self.assertEqual([i["key"] for i in early["now"]],
+                         ["boots", "magic_wand"])      # recipe dropped
+        start = recommend(self.POP, self.ITEMS, -30, set())
+        self.assertEqual([i["key"] for i in start["now"]], ["boots"])  # no tango
+
+    def test_no_data(self):
+        from builds import recommend
+        self.assertIsNone(recommend(None, self.ITEMS, 100, set()))
+
+    def test_watcher_reports_owned_and_paused(self):
+        w = MatchWatcher()
+        p = payload("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+        p["map"]["paused"] = True
+        p["items"]["stash0"] = {"name": "item_boots"}
+        w.feed(p)
+        self.assertTrue(w.status()["paused"])
+        self.assertEqual(w.status()["owned"], {"blink", "boots"})
+
+
 class UpdateTests(unittest.TestCase):
     def test_version_compare(self):
         from updates import is_newer, parse_version

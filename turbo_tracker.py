@@ -21,6 +21,7 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
+import builds
 import opendota
 import setup_gsi
 import ui
@@ -31,7 +32,7 @@ from paths import (DATA as LOCAL, DB_PATH, HEROES_CACHE, INSTANCE, PORTRAITS,
                    SETTINGS)
 from store import Store, start_of_today
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 UPDATE_EVERY_MS = 6 * 3600 * 1000   # re-check GitHub for a new release
 
@@ -53,6 +54,8 @@ def load_settings():
         settings["recap_mode"] = "popup"
     if not isinstance(settings.get("turbo_only"), bool):
         settings["turbo_only"] = False
+    if settings.get("tips") not in ("off", "game", "second"):
+        settings["tips"] = "game"
     return settings
 
 
@@ -194,6 +197,17 @@ class Controller:
         # Tray icon: the way back to the window after closing it.
         self.tray = None
         self._tray_tip = None
+
+        # Tips card while dead / paused, fed by OpenDota item popularity.
+        self.tips = ui.TipsCard(self.item_icon)
+        self.items_db = None
+        self.pops = {}              # hero id -> item popularity
+        self.pop_fetching = set()
+        self.pop_failed = set()
+        self.tips_preview_until = 0.0
+        threading.Thread(target=lambda: self.inbox.put(
+            ("itemsdb", builds.load_items(LOCAL / "items.json"))),
+            daemon=True).start()
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = ui.Tray(self.show_window, self.show_last_recap,
                                 self.quit)
@@ -250,20 +264,30 @@ class Controller:
         """QPixmap for a hero, or None while it downloads."""
         if not internal:
             return None
-        if internal in self.pixmaps:
-            return self.pixmaps[internal]
+        info = self.heroes.get(internal)
+        url = info.get("img") if isinstance(info, dict) else None
         path = PORTRAITS / f"{internal.replace('npc_dota_hero_', '')}.png"
+        return self._cached_pixmap(internal, path, url)
+
+    def item_icon(self, item):
+        """QPixmap for an item dict from builds, or None while it downloads."""
+        key = item.get("key") or ""
+        return self._cached_pixmap("item:" + key, LOCAL / "items" / f"{key}.png",
+                                   item.get("img"))
+
+    def _cached_pixmap(self, cache_key, path, url):
+        if cache_key in self.pixmaps:
+            return self.pixmaps[cache_key]
         if path.exists():
             pix = QPixmap(str(path))
             if not pix.isNull():
-                self.pixmaps[internal] = pix
+                self.pixmaps[cache_key] = pix
                 return pix
-        info = self.heroes.get(internal)
-        url = info.get("img") if isinstance(info, dict) else None
-        if url and internal not in self.downloading:
-            self.downloading.add(internal)
-            threading.Thread(target=self._download, args=(internal, url, path),
-                             daemon=True).start()
+        if url and cache_key not in self.downloading:
+            self.downloading.add(cache_key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            threading.Thread(target=self._download,
+                             args=(cache_key, url, path), daemon=True).start()
         return None
 
     def _download(self, internal, url, path):
@@ -393,6 +417,7 @@ class Controller:
         else:
             color, text = ui.SUBTLE, "Waiting for Dota"
         self.window.status.set(color, text)
+        self.update_tips(live, recent)
         if self.tray and text != self._tray_tip:
             self._tray_tip = text
             self.tray.setToolTip(("Turbo Tracker\n" + text)[:127])
@@ -435,6 +460,17 @@ class Controller:
                     repaint = True
                     if self.card and self.card_hero == payload:
                         self.card.set_pixmap(self.portrait(payload))
+                    if payload.startswith("item:") and self.tips.isVisible():
+                        self.tips.refresh_icons()
+                elif kind == "itemsdb":
+                    self.items_db = payload
+                elif kind == "pop":
+                    hero_id, data = payload
+                    self.pop_fetching.discard(hero_id)
+                    if data:
+                        self.pops[hero_id] = data
+                    else:
+                        self.pop_failed.add(hero_id)
                 elif kind == "update":
                     self._update_result(payload)
                 elif kind == "mode":
@@ -447,6 +483,81 @@ class Controller:
         elif repaint:
             self.window.matches.repaint_rows()
             self.window.heroes.repaint_rows()
+        self.update_status()
+
+    # --- tips card while dead / paused -----------------------------------
+
+    def _want_pop(self, hero_id):
+        """Start fetching a hero's item popularity (once) so it's ready by
+        the time they die."""
+        if not hero_id or hero_id in self.pops or hero_id in self.pop_fetching:
+            return
+        self.pop_fetching.add(hero_id)
+        self.pop_failed.discard(hero_id)
+        folder = LOCAL / "itempop"
+        threading.Thread(target=lambda: self.inbox.put(
+            ("pop", (hero_id, builds.load_popularity(hero_id, folder)))),
+            daemon=True).start()
+
+    def update_tips(self, live, recent):
+        """Show the card only while dead or paused; hide it the moment
+        that stops (respawn, buyback, unpause, game over)."""
+        where = self.settings["tips"]
+        if live and recent:
+            self._want_pop(live.get("hero_id"))
+        in_game = bool(live and recent and live["state"] == LIVE_STATES[0])
+        waiting = in_game and (not live["alive"] or live.get("paused"))
+        preview = time.time() < self.tips_preview_until
+        if where == "off" or not (waiting or preview):
+            if self.tips.isVisible():
+                self.tips.hide()
+            return
+        if not waiting:
+            live = self._preview_live()
+        hero_id = live.get("hero_id")
+        rec = builds.recommend(self.pops.get(hero_id), self.items_db,
+                               live["clock"], live.get("owned") or set())
+        message = None
+        if rec is None:
+            message = ("Item builds unavailable - are you offline?"
+                       if hero_id in self.pop_failed else
+                       "Loading item builds...")
+        if live.get("paused"):
+            self.tips.set_headline("\u23f8  GAME PAUSED", ui.ACCENT)
+        elif live["respawn"] > 0:
+            self.tips.set_headline(f"RESPAWN IN {live['respawn']}s", ui.LOSS)
+        else:
+            self.tips.set_headline("YOU'RE DEAD", ui.LOSS)
+        context = (f"{self.hero_name(live['hero_internal'])}  \u00b7  "
+                   f"{fmt_duration(live['clock'])}")
+        if not waiting:
+            context += "  \u00b7  preview"
+        before = self.tips.size()
+        self.tips.set_content(context, rec, message)
+        if not self.tips.isVisible() or self.tips.size() != before:
+            self.tips.place(where)
+        if not self.tips.isVisible():
+            self.tips.show()
+            winutil.pin_topmost(int(self.tips.winId()))
+
+    def _preview_live(self):
+        """Stand-in game state for the preview shown when you pick a tips
+        option: your last hero, dead at 10:00."""
+        last = self.store.matches(limit=1)
+        hero, hero_id = ("npc_dota_hero_pudge", 14)
+        if last and last[0]["hero_id"]:
+            hero, hero_id = last[0]["hero_internal"], last[0]["hero_id"]
+        self._want_pop(hero_id)
+        return {"hero_internal": hero, "hero_id": hero_id, "clock": 600,
+                "alive": False, "respawn": 23, "paused": False,
+                "owned": set(), "state": LIVE_STATES[0]}
+
+    def set_tips(self, key):
+        self.settings["tips"] = key
+        save_settings(self.settings)
+        self.tips.hide()
+        # Show where it will appear for a few seconds.
+        self.tips_preview_until = time.time() + 6 if key != "off" else 0
         self.update_status()
 
     # --- update check ---------------------------------------------------
@@ -618,6 +729,8 @@ class Controller:
             winutil.pin_topmost(int(self.panel.winId()))
         if self.card:
             winutil.pin_topmost(int(self.card.winId()))
+        if self.tips.isVisible():
+            winutil.pin_topmost(int(self.tips.winId()))
 
     # --- options and lifetime ---------------------------------------------
 
@@ -663,6 +776,7 @@ class Controller:
         self.quitting = True
         if self.tray:
             self.tray.hide()      # or a dead icon lingers until hovered
+        self.tips.hide()
         if self.server:
             threading.Thread(target=self.server.shutdown, daemon=True).start()
         # exit() rather than quit(): Qt 6's quit() first asks every window

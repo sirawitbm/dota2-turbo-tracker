@@ -25,6 +25,17 @@ def _int(value):
         return None
 
 
+def owned_items(items):
+    """Keys (no "item_" prefix) of everything the player has: inventory,
+    backpack, stash, neutral slot."""
+    owned = set()
+    for slot, info in items.items():
+        name = (info or {}).get("name", "empty") if isinstance(info, dict) else "empty"
+        if name != "empty" and slot.startswith(("slot", "stash", "neutral")):
+            owned.add(name[5:] if name.startswith("item_") else name)
+    return owned
+
+
 def item_names(items):
     """Names of the six main inventory slots plus the neutral item."""
     names = []
@@ -81,6 +92,8 @@ class MatchWatcher:
             "radiant_score": _int(game_map.get("radiant_score")),
             "dire_score": _int(game_map.get("dire_score")),
             "items": item_names(data.get("items") or {}),
+            "owned": owned_items(data.get("items") or {}),
+            "paused": bool(game_map.get("paused")),
         }
 
         win_team = game_map.get("win_team") or "none"

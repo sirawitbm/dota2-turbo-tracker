@@ -85,6 +85,19 @@ right-click the tray icon > **Quit**.
 
     ![Taskbar panel: Today 3-2, Pudge W 14/5/21](docs/panel.png)
 - **Show last recap** brings back the card for your latest game.
+- **Tips when dead**: while you're dead or the game is paused, a small
+  card like Dota's pause tips shows the items most bought on your hero at
+  this stage of the game - ticked if you already have them - and what's
+  coming up next. It disappears the instant you respawn or buy back, and
+  it's click-through and never takes focus, so it can't get in the way.
+  Pick *Game screen* (top middle), *2nd screen* (if you have one) or
+  *Off*. Picking one shows a 6-second preview.
+
+  ![Tips card while dead: respawn in 18s, popular mid-game items for Juggernaut with owned ones ticked, and late-game items coming up](docs/tips.png)
+
+  The item lists come from OpenDota's popularity data for regular matches
+  (Turbo doesn't have its own), with the game stages squeezed to Turbo's
+  faster clock. It's what people buy most, not a guaranteed best build.
 - **Updates**: at start and every few hours it asks GitHub whether a newer
   release is out. If so, a green banner offers **Download** (opens the
   release page in your browser) or **Later** (stay quiet about that
@@ -117,7 +130,7 @@ a few hours of trying they become *Practice / lobby* and never count in
 Everything stays on your PC: in `%LOCALAPPDATA%\TurboTracker` for the
 installed version, or the `data` folder beside a portable exe. The only
 things sent anywhere are match ids to OpenDota (to look up the mode),
-downloads of hero names and pictures, and a check of this repo's latest
+requests for hero item popularity, downloads of hero and item pictures, and a check of this repo's latest
 release on GitHub.
 
 To uninstall completely, also delete

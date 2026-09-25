@@ -499,8 +499,8 @@ class MainWindow(QWidget):
         self.ctl = ctl
         self.setObjectName("main")
         self.setWindowTitle("Turbo Tracker")
-        self.resize(1080, 720)
-        self.setMinimumSize(920, 560)
+        self.resize(1120, 720)
+        self.setMinimumSize(1060, 560)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 22)
@@ -594,6 +594,15 @@ class MainWindow(QWidget):
                                ctl.settings["recap_mode"])
         self.recap.changed.connect(ctl.set_recap_mode)
         foot.addWidget(self.recap)
+        foot.addSpacing(22)
+        foot.addWidget(label("TIPS WHEN DEAD", "caption"))
+        foot.addSpacing(6)
+        choices = [("Off", "off"), ("Game screen", "game")]
+        if len(QGuiApplication.screens()) > 1:
+            choices.append(("2nd screen", "second"))
+        self.tips = Segmented(choices, ctl.settings["tips"])
+        self.tips.changed.connect(ctl.set_tips)
+        foot.addWidget(self.tips)
         foot.addStretch()
         foot.addWidget(button("Show last recap", "ghost", ctl.show_last_recap))
         root.addLayout(foot)
@@ -946,6 +955,158 @@ class RecapCard(QWidget):
         fade.start()
         self._fade_out = fade
         self.on_close(self)
+
+
+# ---------------------------------------------------------------------------
+# tips card (while dead or paused)
+# ---------------------------------------------------------------------------
+
+class ItemTile(QWidget):
+    """Item icon with rounded corners, a tick if you own it, name below."""
+
+    def __init__(self, item, pix, size):
+        super().__init__()
+        self.item, self.pix, self.icon = item, pix, size
+        self.setFixedSize(max(size.width() + 16, 92), size.height() + 22)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = QRect((self.width() - self.icon.width()) // 2, 0,
+                  self.icon.width(), self.icon.height())
+        owned = self.item.get("owned")
+        if owned:
+            p.setOpacity(0.55)
+        draw_portrait(p, r, self.pix, self.item["name"], radius=6)
+        p.setOpacity(1.0)
+        if owned:
+            badge = QRectF(r.right() - 13, r.top() - 3, 16, 16)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(WIN))
+            p.drawEllipse(badge)
+            p.setPen(QPen(QColor("#0b0d11"), 2))
+            c = badge.center()
+            p.drawPolyline([QPoint(int(c.x() - 4), int(c.y())),
+                            QPoint(int(c.x() - 1), int(c.y() + 3)),
+                            QPoint(int(c.x() + 4), int(c.y() - 3))])
+        p.setPen(QColor(MUTED if owned else TEXT))
+        p.setFont(font(10, QFont.DemiBold))
+        name_r = QRect(0, r.bottom() + 4, self.width(), 16)
+        p.drawText(name_r, Qt.AlignHCenter | Qt.AlignTop,
+                   QFontMetrics(p.font()).elidedText(self.item["name"],
+                                                     Qt.ElideRight,
+                                                     self.width()))
+
+
+class TipsCard(QWidget):
+    """Shown only while you're dead or the game is paused, like Dota's own
+    pause tips. Click-through and never takes focus, so it can't get in the
+    way of the game; the controller hides it the instant you're back."""
+
+    WIDTH = 560
+    BIG = QSize(64, 47)      # Dota item art is 88x64
+    SMALL = QSize(48, 35)
+
+    def __init__(self, icon_for):
+        super().__init__(None, FLOAT_FLAGS | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.icon_for = icon_for
+        self._sig = None
+        self.setFixedWidth(self.WIDTH)
+
+        self.box = QVBoxLayout(self)
+        self.box.setContentsMargins(22, 16, 22, 18)
+        self.box.setSpacing(8)
+        head = QHBoxLayout()
+        self.headline = label("")
+        self.headline.setStyleSheet("font-size: 15px; font-weight: 700;")
+        head.addWidget(self.headline)
+        head.addStretch()
+        self.context = label("")
+        self.context.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+        head.addWidget(self.context)
+        self.box.addLayout(head)
+        self.body = QWidget()
+        self.box.addWidget(self.body)
+        self.hide()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.setBrush(tint(BG, 235))
+        p.drawRoundedRect(r, 16, 16)
+
+    def set_headline(self, text, color):
+        self.headline.setText(text)
+        self.headline.setStyleSheet(
+            f"font-size: 15px; font-weight: 700; color: {color};")
+
+    def set_content(self, context, rec, message=None):
+        """rec from builds.recommend(); rebuilt only when it changes."""
+        self.context.setText(context)
+        sig = (message, repr(rec) if rec else None)
+        if sig == self._sig:
+            return
+        self._sig = sig
+        self.box.removeWidget(self.body)
+        self.body.deleteLater()
+        self.body = QWidget()
+        lay = QVBoxLayout(self.body)
+        lay.setContentsMargins(0, 4, 0, 0)
+        lay.setSpacing(6)
+        if message or not rec:
+            note = label(message or "No item data yet")
+            note.setStyleSheet(f"color: {MUTED}; font-size: 13px;")
+            lay.addWidget(note)
+        else:
+            lay.addWidget(self._caption(f"POPULAR NOW · {rec['stage'].upper()}"))
+            lay.addLayout(self._row(rec["now"], self.BIG))
+            if rec["next"]:
+                lay.addSpacing(4)
+                lay.addWidget(self._caption(
+                    f"COMING UP · {rec['next_stage'].upper()}"))
+                lay.addLayout(self._row(rec["next"], self.SMALL))
+        self.box.addWidget(self.body)
+        self.adjustSize()
+
+    def refresh_icons(self):
+        for tile in self.body.findChildren(ItemTile):
+            tile.pix = self.icon_for(tile.item)
+            tile.update()
+
+    def _caption(self, text):
+        c = label(text)
+        c.setStyleSheet(f"color: {SUBTLE}; font-size: 10px; font-weight: 700;"
+                        " letter-spacing: 0.8px;")
+        return c
+
+    def _row(self, items, size):
+        row = QHBoxLayout()
+        row.setSpacing(2)
+        for it in items:
+            row.addWidget(ItemTile(it, self.icon_for(it), size))
+        row.addStretch()
+        return row
+
+    def place(self, where):
+        """"game": top middle of the main screen, under Dota's hero bar.
+        "second": middle of another monitor (falls back to "game")."""
+        screens = QGuiApplication.screens()
+        primary = QGuiApplication.primaryScreen()
+        others = [s for s in screens if s is not primary]
+        self.adjustSize()
+        if where == "second" and others:
+            g = others[0].availableGeometry()
+            self.move(g.center().x() - self.width() // 2,
+                      g.center().y() - self.height() // 2)
+            return
+        g = primary.geometry()
+        self.move(g.center().x() - self.width() // 2,
+                  g.top() + int(g.height() * 0.10))
 
 
 # ---------------------------------------------------------------------------

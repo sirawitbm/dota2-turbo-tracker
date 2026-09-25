@@ -22,7 +22,7 @@ CFG_TEMPLATE = """"Turbo Tracker"
 	"uri"       "http://127.0.0.1:{port}/"
 	"timeout"   "5.0"
 	"buffer"    "0.1"
-	"throttle"  "0.5"
+	"throttle"  "0.1"
 	"heartbeat" "30.0"
 	"auth"
 	{{
@@ -125,10 +125,13 @@ def config_matches():
     target = config_path()
     if target is None or not target.exists():
         return False
-    token = load_settings().get("token")
+    settings = load_settings()
+    if not settings.get("token"):
+        return False
+    expected = CFG_TEMPLATE.format(port=settings.get("port", PORT),
+                                   token=settings["token"])
     try:
-        return bool(token) and f'"{token}"' in target.read_text(
-            encoding="utf-8", errors="ignore")
+        return target.read_text(encoding="utf-8", errors="ignore") == expected
     except OSError:
         return False
 
