@@ -24,8 +24,8 @@ Get the latest from **[Releases](https://github.com/sirawitbm/dota2-turbo-tracke
 
 | File | Pick it if |
 | --- | --- |
-| `TurboTracker-v0.1.0-Setup.exe` | You want a normal install with a Start menu entry. No admin needed. |
-| `TurboTracker-v0.1.0-windows-x64.zip` | You want a portable copy. Unzip anywhere; data stays in a `data` folder beside the exe. |
+| `TurboTracker-vX.Y.Z-Setup.exe` | You want a normal install with a Start menu entry. No admin needed. |
+| `TurboTracker-vX.Y.Z-windows-x64.zip` | You want a portable copy. Unzip anywhere; data stays in a `data` folder beside the exe. |
 
 Windows **SmartScreen will warn** ("Windows protected your PC") because the
 app isn't code-signed. Click **More info > Run anyway**. To check the file
@@ -33,7 +33,7 @@ is the one built here, compare its SHA-256 with the `.sha256` file on the
 release page:
 
 ```powershell
-Get-FileHash .\TurboTracker-v0.1.0-Setup.exe -Algorithm SHA256
+Get-FileHash .\TurboTracker-vX.Y.Z-Setup.exe -Algorithm SHA256
 ```
 
 ## Setup (once)

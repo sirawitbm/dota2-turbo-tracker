@@ -28,7 +28,7 @@ from gsi import MatchWatcher
 from paths import DATA as LOCAL, DB_PATH, HEROES_CACHE, PORTRAITS, SETTINGS
 from store import Store, start_of_today
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # How long after a match to ask OpenDota for its game mode. Valve publishes
 # matches a few minutes after they end; bot/lobby games never appear.
