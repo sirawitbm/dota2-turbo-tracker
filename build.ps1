@@ -23,7 +23,6 @@ try {
         --name $ProjectExeName `
         --icon $iconPath `
         --version-file $versionInfoPath `
-        --exclude-module PySide6.QtNetwork `
         --exclude-module PySide6.QtQml `
         --exclude-module PySide6.QtQuick `
         --exclude-module PySide6.QtPdf `

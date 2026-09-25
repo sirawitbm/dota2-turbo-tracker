@@ -27,6 +27,14 @@ def data_dir():
 
 
 DATA = data_dir()
+
+# Name for the single-instance mutex and the "show yourself" pipe. A demo
+# or test run with its own data folder gets its own name, so it never
+# talks to (or is blocked by) the copy the user is actually running.
+INSTANCE = "TurboTracker"
+if os.environ.get("TURBO_TRACKER_DATA"):
+    import hashlib
+    INSTANCE += "-" + hashlib.sha1(str(DATA).encode()).hexdigest()[:8]
 SETTINGS = DATA / "settings.json"
 DB_PATH = DATA / "turbo.db"
 HEROES_CACHE = DATA / "heroes.json"

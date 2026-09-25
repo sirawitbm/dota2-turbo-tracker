@@ -18,7 +18,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import QApplication
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 import opendota
 import setup_gsi
@@ -26,10 +27,11 @@ import ui
 import updates
 import winutil
 from gsi import MatchWatcher
-from paths import DATA as LOCAL, DB_PATH, HEROES_CACHE, PORTRAITS, SETTINGS
+from paths import (DATA as LOCAL, DB_PATH, HEROES_CACHE, INSTANCE, PORTRAITS,
+                   SETTINGS)
 from store import Store, start_of_today
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 UPDATE_EVERY_MS = 6 * 3600 * 1000   # re-check GitHub for a new release
 
@@ -188,6 +190,19 @@ class Controller:
         if not self.heroes or not all(isinstance(v, dict)
                                       for v in self.heroes.values()):
             threading.Thread(target=self._fetch_heroes, daemon=True).start()
+
+        # Tray icon: the way back to the window after closing it.
+        self.tray = None
+        self._tray_tip = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = ui.Tray(self.show_window, self.show_last_recap,
+                                self.quit)
+            self.tray.show()
+        # A second launch (Start menu, desktop) asks this copy to show up.
+        self.instance_server = QLocalServer(app)
+        self.instance_server.newConnection.connect(self._second_launch)
+        QLocalServer.removeServer(INSTANCE)
+        self.instance_server.listen(INSTANCE)
 
         self.refresh()
         self.apply_recap_mode()
@@ -378,6 +393,9 @@ class Controller:
         else:
             color, text = ui.SUBTLE, "Waiting for Dota"
         self.window.status.set(color, text)
+        if self.tray and text != self._tray_tip:
+            self._tray_tip = text
+            self.tray.setToolTip(("Turbo Tracker\n" + text)[:127])
         if self.panel:
             if live and recent and live["state"] in LIVE_STATES:
                 self.panel.show_text(
@@ -453,6 +471,8 @@ class Controller:
         self.window.set_update(version, __version__)
         if self.panel:
             self.panel.set_update(version, self.open_update)
+        if self.tray:
+            self.tray.set_update(version, self.open_update)
 
     def open_update(self):
         if self.update:
@@ -617,15 +637,32 @@ class Controller:
         self.window.raise_()
         self.window.activateWindow()
 
+    def _second_launch(self):
+        conn = self.instance_server.nextPendingConnection()
+        if conn:
+            conn.disconnectFromServer()
+        self.show_window()
+
     def on_window_closed(self):
-        # In panel mode the panel stays as the way back in; otherwise quit.
-        if self.panel:
-            self.window.hide()
-        else:
-            self.quit()
+        # Keep running (it has games to log): hide to the tray or panel.
+        if not self.tray and not self.panel:
+            self.quit()        # no tray on this system: nowhere to hide
+            return
+        self.window.hide()
+        if self.tray and not self.panel and                 not self.settings.get("tray_hint_shown"):
+            self.tray.showMessage(
+                "Turbo Tracker is still running",
+                "It keeps logging your games. Click the Turbo Tracker icon "
+                "in the tray (under ^ if it's hidden) to open it again, or "
+                "right-click it > Quit.",
+                ui.app_icon(), 8000)
+            self.settings["tray_hint_shown"] = True
+            save_settings(self.settings)
 
     def quit(self):
         self.quitting = True
+        if self.tray:
+            self.tray.hide()      # or a dead icon lingers until hovered
         if self.server:
             threading.Thread(target=self.server.shutdown, daemon=True).start()
         # exit() rather than quit(): Qt 6's quit() first asks every window
@@ -634,9 +671,9 @@ class Controller:
 
 
 def main():
+    app = QApplication(sys.argv)
     if not acquire():
         return
-    app = QApplication(sys.argv)
     app.setApplicationName("Turbo Tracker")
     app.setQuitOnLastWindowClosed(False)
     ui.apply_theme(app)
@@ -645,8 +682,16 @@ def main():
 
 
 def acquire():
-    if winutil.acquire_single_instance():
+    """True if we're the only copy. Otherwise ask the running copy to show
+    its window (so opening the app again from the Start menu just brings
+    it back) and bow out."""
+    if winutil.acquire_single_instance("Local\\" + INSTANCE):
         return True
+    sock = QLocalSocket()
+    sock.connectToServer(INSTANCE)
+    if sock.waitForConnected(1500):
+        sock.disconnectFromServer()
+        return False
     winutil.message_box("Turbo Tracker is already running.", "Turbo Tracker")
     return False
 

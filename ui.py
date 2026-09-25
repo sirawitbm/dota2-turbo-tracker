@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup,
                                QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
                                QLabel, QListView, QMenu, QPushButton,
                                QSizePolicy, QStackedWidget, QStyle,
-                               QStyledItemDelegate, QVBoxLayout, QWidget)
+                               QStyledItemDelegate, QSystemTrayIcon,
+                               QVBoxLayout, QWidget)
 
 import winutil
 
@@ -635,6 +636,46 @@ class MainWindow(QWidget):
 # floating windows shared bits
 # ---------------------------------------------------------------------------
 
+def rounded_menu():
+    """A QMenu whose rounded QSS corners aren't boxed in by a square frame."""
+    menu = QMenu()
+    menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint
+                        | Qt.NoDropShadowWindowHint)
+    menu.setAttribute(Qt.WA_TranslucentBackground)
+    return menu
+
+
+class Tray(QSystemTrayIcon):
+    """Icon in the notification area: click to open, right-click for more.
+
+    Qt re-adds the icon itself when Explorer restarts (the TaskbarCreated
+    case from the skill), so there's no Win32 code here.
+    """
+
+    def __init__(self, on_open, on_recap, on_quit):
+        super().__init__(app_icon())
+        self.setToolTip("Turbo Tracker")
+        self.menu = rounded_menu()
+        self.menu.addAction("Open Turbo Tracker", on_open)
+        self.menu.addAction("Show last recap", on_recap)
+        self._on_update = None
+        self.update_action = self.menu.addAction(
+            "Update available", lambda: self._on_update and self._on_update())
+        self.update_action.setVisible(False)
+        self.menu.addSeparator()
+        self.menu.addAction("Quit", on_quit)
+        self.setContextMenu(self.menu)
+        self.activated.connect(
+            lambda reason: on_open() if reason in (
+                QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
+
+    def set_update(self, version, on_click):
+        self._on_update = on_click if version else None
+        self.update_action.setVisible(bool(version))
+        if version:
+            self.update_action.setText(f"Download update {version}")
+
+
 FLOAT_FLAGS = (Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint)
 
@@ -930,11 +971,7 @@ class TaskbarPanel(QWidget):
         # Where the user dragged it: (centre x, top y), kept as the centre so
         # the pill grows evenly both ways when its text gets longer.
         self.custom = saved_pos if self._valid(saved_pos) else None
-        self.menu = QMenu()
-        self.menu.setWindowFlags(self.menu.windowFlags()
-                                 | Qt.FramelessWindowHint
-                                 | Qt.NoDropShadowWindowHint)
-        self.menu.setAttribute(Qt.WA_TranslucentBackground)
+        self.menu = rounded_menu()
         self.menu.addAction("Open Turbo Tracker", on_open)
         self.menu.addAction("Show last recap", on_recap)
         self.menu.addAction("Move back to the taskbar", self.reset_position)

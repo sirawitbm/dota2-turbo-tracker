@@ -59,6 +59,12 @@ The banner disappears once data starts arriving.
 Leave Turbo Tracker running while you play. The top-right pill shows what
 it sees: *Waiting for Dota*, *Dota is running*, or live **In game** stats.
 
+**Closing the window doesn't quit** - it keeps logging from the **tray
+icon** (Windows 11 may tuck it under the **^** by the clock; drag it onto
+the taskbar to keep it visible). Click the icon, or just open Turbo
+Tracker again from the Start menu, to bring the window back. To quit,
+right-click the tray icon > **Quit**.
+
 ![Heroes tab: games, win-loss, a win-rate bar and averages per hero](docs/heroes.png)
 
 - **Tiles**: total games (and today), win-loss, win rate (and your last
@@ -70,8 +76,8 @@ it sees: *Waiting for Dota*, *Dota is running*, or live **In game** stats.
     (hover it to keep it open, click to close).
   - **Taskbar panel** - a small pill on the taskbar beside the clock with
     today's record, and live stats while you play. The recap opens above it
-    and stays until clicked. Closing the main window keeps the panel; click
-    it to reopen, right-click to quit.
+    and stays until clicked. Click the panel to open the window, right-click
+    it for more.
 
     In borderless windowed the taskbar is hidden, so the pill floats over
     Dota's HUD. **Drag it** somewhere it's out of the way; it remembers the
