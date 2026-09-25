@@ -1,0 +1,19 @@
+# Private to this PC - never commit
+local/
+captures/
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Build output
+build/
+dist/
+*.spec
+*.tmp
+
+# Private handoff notes (personal details, local paths)
+PLAN.md

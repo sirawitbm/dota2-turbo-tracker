@@ -1,0 +1,598 @@
+"""Turbo Tracker - logs your Dota 2 games and shows a recap when one ends.
+
+Run:  python turbo_tracker.py      (or double-click "Turbo Tracker.bat")
+
+Reads only what Dota's official Game State Integration sends about your own
+hero. It never touches the game: no input, no memory reading.
+"""
+
+import json
+import os
+import queue
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+
+import opendota
+import setup_gsi
+import ui
+import winutil
+from gsi import MatchWatcher
+from paths import DATA as LOCAL, DB_PATH, HEROES_CACHE, PORTRAITS, SETTINGS
+from store import Store, start_of_today
+
+__version__ = "0.1.0"
+
+# How long after a match to ask OpenDota for its game mode. Valve publishes
+# matches a few minutes after they end; bot/lobby games never appear.
+MODE_DELAYS = [120, 600, 1800, 7200, 21600]
+
+LIVE_STATES = ("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+               "DOTA_GAMERULES_STATE_PRE_GAME")
+
+
+# ---------------------------------------------------------------------------
+# settings and formatting
+# ---------------------------------------------------------------------------
+
+def load_settings():
+    settings = setup_gsi.ensure_settings()
+    if settings.get("recap_mode") not in ("popup", "panel"):
+        settings["recap_mode"] = "popup"
+    if not isinstance(settings.get("turbo_only"), bool):
+        settings["turbo_only"] = False
+    return settings
+
+
+def save_settings(settings):
+    """Write to a temp file then swap it in, so a crash can't half-write."""
+    LOCAL.mkdir(exist_ok=True)
+    tmp = SETTINGS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    os.replace(tmp, SETTINGS)
+
+
+def fmt_duration(seconds):
+    seconds = max(0, int(seconds or 0))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def fmt_when(ts):
+    when = datetime.fromtimestamp(ts)
+    today = datetime.now().date()
+    if when.date() == today:
+        return f"Today {when:%H:%M}"
+    if when.date() == today - timedelta(days=1):
+        return f"Yesterday {when:%H:%M}"
+    return f"{when:%d %b %H:%M}"
+
+
+def ordinal(n):
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
+def mode_label(row):
+    if row["game_mode"] is not None:
+        return opendota.MODE_NAMES.get(row["game_mode"],
+                                       f"Mode {row['game_mode']}")
+    if row["mode_status"] == "not_public":
+        return "Practice / lobby"
+    return "Checking mode..."
+
+
+def pct(wins, losses):
+    total = wins + losses
+    return round(100 * wins / total) if total else None
+
+
+def streaks(rows):
+    """(current streak text, colour key, best win streak) from newest-first
+    rows."""
+    results = [r["won"] for r in rows if r["won"] in (0, 1)]
+    if not results:
+        return "-", None, 0
+    first, n = results[0], 0
+    for r in results:
+        if r != first:
+            break
+        n += 1
+    best = run = 0
+    for r in results:
+        run = run + 1 if r == 1 else 0
+        best = max(best, run)
+    return f"{'W' if first else 'L'}{n}", first, best
+
+
+# ---------------------------------------------------------------------------
+# GSI listener (background thread -> queue -> Qt thread)
+# ---------------------------------------------------------------------------
+
+def start_listener(port, token, inbox):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length))
+            except ValueError:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if (data.get("auth") or {}).get("token") != token:
+                self.send_response(403)   # not from our Dota config
+                self.end_headers()
+                return
+            data.pop("auth", None)
+            inbox.put(("gsi", data))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+# ---------------------------------------------------------------------------
+# controller
+# ---------------------------------------------------------------------------
+
+class Controller:
+    def __init__(self, app):
+        self.app = app
+        LOCAL.mkdir(parents=True, exist_ok=True)
+        PORTRAITS.mkdir(exist_ok=True)
+        self.settings = load_settings()
+        self.store = Store(DB_PATH)
+        self.watcher = MatchWatcher()
+        self.inbox = queue.Queue()
+        self.heroes = self._load_hero_cache()
+        self.pixmaps = {}
+        self.downloading = set()
+        self.last_message = 0.0
+        self.mode_in_flight = set()
+        self.card = None
+        self.card_match = None
+        self.card_hero = None
+        self.panel = None
+        self.panel_idle = ("Today 0-0", "no games yet", ui.MUTED, ui.ACCENT)
+        self.listen_error = None
+        self.server = None
+        self._repaired = False
+        self.version = __version__
+
+        try:
+            self.server = start_listener(self.settings["port"],
+                                         self.settings["token"], self.inbox)
+        except OSError as err:
+            self.listen_error = (f"Couldn't listen on port "
+                                 f"{self.settings['port']} ({err}). Is another "
+                                 "copy of Turbo Tracker or capture.py running?")
+
+        self.window = ui.MainWindow(self)
+        self.window.closed.connect(self.on_window_closed)
+        if not self.heroes or not all(isinstance(v, dict)
+                                      for v in self.heroes.values()):
+            threading.Thread(target=self._fetch_heroes, daemon=True).start()
+
+        self.refresh()
+        self.apply_recap_mode()
+        self.window.show()
+
+        self._timer(150, self._poll)
+        self._timer(30000, self._check_modes, first=3000)
+        self._timer(2000, self._pin)
+
+    def _timer(self, interval, fn, first=None):
+        t = QTimer(self.app)
+        t.timeout.connect(fn)
+        t.start(interval)
+        if first is not None:
+            QTimer.singleShot(first, fn)
+        return t
+
+    # --- heroes: names and portraits ------------------------------------
+
+    def _load_hero_cache(self):
+        try:
+            data = json.loads(HEROES_CACHE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _fetch_heroes(self):
+        try:
+            self.inbox.put(("heroes", opendota.hero_names()))
+        except Exception:
+            pass
+
+    def hero_name(self, internal):
+        info = self.heroes.get(internal or "")
+        if isinstance(info, dict):
+            return info.get("name") or internal
+        if isinstance(info, str):          # older cache format
+            return info
+        if not internal:
+            return "Unknown hero"
+        return internal.replace("npc_dota_hero_", "").replace("_", " ").title()
+
+    def portrait(self, internal):
+        """QPixmap for a hero, or None while it downloads."""
+        if not internal:
+            return None
+        if internal in self.pixmaps:
+            return self.pixmaps[internal]
+        path = PORTRAITS / f"{internal.replace('npc_dota_hero_', '')}.png"
+        if path.exists():
+            pix = QPixmap(str(path))
+            if not pix.isNull():
+                self.pixmaps[internal] = pix
+                return pix
+        info = self.heroes.get(internal)
+        url = info.get("img") if isinstance(info, dict) else None
+        if url and internal not in self.downloading:
+            self.downloading.add(internal)
+            threading.Thread(target=self._download, args=(internal, url, path),
+                             daemon=True).start()
+        return None
+
+    def _download(self, internal, url, path):
+        try:
+            data = opendota.download(url)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+        self.inbox.put(("portrait", internal))
+
+    # --- screen updates --------------------------------------------------
+
+    def refresh(self):
+        turbo = self.settings["turbo_only"]
+        rows = self.store.matches(turbo)
+        s = self.store.summary(turbo)
+        tw, tl = self.store.today_record(turbo)
+        w = self.window
+
+        w.t_games.set(str(s["games"]), f"{s['today']} today  ·  {tw}-{tl}")
+        w.t_record.set(f"{s['wins']} - {s['losses']}")
+        w.t_record.bar.set(s["wins"], s["losses"])
+        w.t_record.sub.setText("")
+        rate = pct(s["wins"], s["losses"])
+        last10 = [r["won"] for r in rows[:10] if r["won"] in (0, 1)]
+        w.t_rate.set("-" if rate is None else f"{rate}%",
+                     f"Last {len(last10)}: {sum(last10)}-"
+                     f"{len(last10) - sum(last10)}" if last10 else "",
+                     ui.TEXT if rate is None else
+                     (ui.WIN if rate >= 50 else ui.LOSS))
+        text, key, best = streaks(rows)
+        w.t_streak.set(text, f"Best win streak: {best}" if best else "",
+                       {1: ui.WIN, 0: ui.LOSS}.get(key, ui.TEXT))
+
+        w.matches.set_rows([self._match_row(r) for r in rows], (
+            "No Turbo games confirmed yet.\n\nGames appear here once OpenDota "
+            "confirms their mode. Bot and lobby games never do - pick "
+            "\"All games\" to see everything." if turbo else
+            "No games yet.\n\nLeave Turbo Tracker running and play a match - "
+            "it shows up here the moment the game ends."))
+        w.heroes.set_rows([self._hero_row(h) for h in self.store.heroes(turbo)],
+                          "Your heroes will appear here after your first game.")
+        self.update_banner()
+        self.update_panel()
+
+    def _match_row(self, r):
+        return {
+            "hero_internal": r["hero_internal"],
+            "hero": self.hero_name(r["hero_internal"]),
+            "subtitle": f"{fmt_when(r['ended_at'])}  ·  {mode_label(r)}",
+            "won": r["won"],
+            "kda": f"{r['kills']} / {r['deaths']} / {r['assists']}",
+            "length": fmt_duration(r["duration"]),
+            "gpm": r["gpm"], "xpm": r["xpm"],
+            "lh": f"{r['last_hits']} / {r['denies']}",
+        }
+
+    def _hero_row(self, h):
+        wins, losses = h["wins"] or 0, h["losses"] or 0
+        return {
+            "hero_internal": h["hero_internal"],
+            "hero": self.hero_name(h["hero_internal"]),
+            "subtitle": f"Last played {fmt_when(h['last_played'])}",
+            "games": h["games"], "record": f"{wins} - {losses}",
+            "rate": pct(wins, losses),
+            "kda": f"{h['k']:.1f} / {h['d']:.1f} / {h['a']:.1f}",
+            "gpm": round(h["gpm"] or 0),
+        }
+
+    def update_banner(self):
+        text, button = None, False
+        if self.listen_error:
+            text = self.listen_error
+        elif time.time() - self.last_message < 60:
+            text = None          # data is arriving, so the setup works
+        else:
+            cfg = setup_gsi.config_path()
+            if cfg is None:
+                text = "Couldn't find Dota 2 in your Steam libraries."
+            elif not cfg.exists():
+                text = ("Dota isn't connected to Turbo Tracker yet. Click "
+                        "Set up now to add the connection file.")
+                button = True
+            elif not setup_gsi.config_matches() and not self._repaired:
+                # Our file, written by another copy (source vs exe) with a
+                # different token: rewrite it once, quietly.
+                self._repaired = True
+                try:
+                    setup_gsi.install()
+                    text = ("Updated Dota's connection file for this copy of "
+                            "Turbo Tracker - restart Dota if it's open.")
+                except RuntimeError as err:
+                    text = str(err)
+            elif setup_gsi.launch_option_set() is False:
+                text = ("One step left: in Steam, right-click Dota 2 › "
+                        "Properties › General › Launch Options and "
+                        "add  -gamestateintegration  then restart Dota.")
+        self.window.set_banner(text, button)
+
+    def run_setup(self):
+        try:
+            setup_gsi.install()
+        except RuntimeError as err:
+            self.window.set_banner(str(err), False)
+            return
+        self.update_banner()
+
+    def update_status(self):
+        live = self.watcher.status()
+        recent = time.time() - self.last_message < 45
+        if self.listen_error:
+            color, text = ui.LOSS, "Not listening"
+        elif live and recent and live["state"] in LIVE_STATES:
+            bits = [self.hero_name(live["hero_internal"]),
+                    fmt_duration(live["clock"]),
+                    f"{live['kills']}/{live['deaths']}/{live['assists']}",
+                    f"{live['gpm']} GPM"]
+            if not live["alive"]:
+                bits.append(f"respawn {live['respawn']}s")
+            color, text = ui.WIN, "In game  ·  " + "  ·  ".join(bits)
+        elif live and recent:
+            color, text = ui.ACCENT, "Match loading"
+        elif recent:
+            color, text = ui.ACCENT, "Dota is running · waiting for a match"
+        else:
+            color, text = ui.SUBTLE, "Waiting for Dota"
+        self.window.status.set(color, text)
+        if self.panel:
+            if live and recent and live["state"] in LIVE_STATES:
+                self.panel.show_text(
+                    fmt_duration(live["clock"]),
+                    f"{self.hero_name(live['hero_internal'])}  "
+                    f"{live['kills']}/{live['deaths']}/{live['assists']}",
+                    ui.TEXT, ui.WIN)
+            else:
+                self.panel.show_text(*self.panel_idle)
+
+    # --- message loop ----------------------------------------------------
+
+    def _poll(self):
+        changed = repaint = False
+        try:
+            while True:
+                kind, payload = self.inbox.get_nowait()
+                if kind == "gsi":
+                    first = time.time() - self.last_message > 60
+                    self.last_message = time.time()
+                    if first:
+                        self.update_banner()
+                    match = self.watcher.feed(payload)
+                    if match and self.store.add_match(match):
+                        changed = True
+                        self.show_recap(match["match_id"])
+                elif kind == "heroes":
+                    self.heroes = payload
+                    try:
+                        HEROES_CACHE.write_text(json.dumps(payload),
+                                                encoding="utf-8")
+                    except OSError:
+                        pass
+                    changed = True
+                elif kind == "portrait":
+                    self.downloading.discard(payload)
+                    repaint = True
+                    if self.card and self.card_hero == payload:
+                        self.card.set_pixmap(self.portrait(payload))
+                elif kind == "mode":
+                    self._mode_result(*payload)
+                    changed = True
+        except queue.Empty:
+            pass
+        if changed:
+            self.refresh()
+        elif repaint:
+            self.window.matches.repaint_rows()
+            self.window.heroes.repaint_rows()
+        self.update_status()
+
+    # --- OpenDota game-mode lookups --------------------------------------
+
+    def _check_modes(self):
+        now = time.time()
+        for row in self.store.pending_modes():
+            mid, tries = row["match_id"], row["mode_tries"]
+            if mid in self.mode_in_flight:
+                continue
+            if tries >= len(MODE_DELAYS):
+                self.store.set_mode(mid, None, "not_public")
+                self.refresh()
+            elif now >= row["ended_at"] + MODE_DELAYS[tries]:
+                self.mode_in_flight.add(mid)
+                threading.Thread(target=self._lookup_mode, args=(mid,),
+                                 daemon=True).start()
+
+    def _lookup_mode(self, match_id):
+        status, mode = opendota.match_mode(match_id)
+        self.inbox.put(("mode", (match_id, status, mode)))
+
+    def _mode_result(self, match_id, status, mode):
+        self.mode_in_flight.discard(match_id)
+        if status == "found":
+            self.store.set_mode(match_id, mode, "found")
+        else:
+            self.store.note_mode_try(match_id)
+            row = self.store.get(match_id)
+            if row and row["mode_tries"] >= len(MODE_DELAYS):
+                self.store.set_mode(match_id, None, "not_public")
+        if self.card and self.card_match == match_id:
+            self.card.set_mode(mode_label(self.store.get(match_id)))
+
+    # --- recap card ------------------------------------------------------
+
+    def recap_info(self, row):
+        hero = self.hero_name(row["hero_internal"])
+        facts = self.store.hero_facts(row["hero_internal"])
+        record = f"{facts['wins']}-{facts['losses']} all-time on this hero"
+        if row["ended_at"] >= start_of_today():
+            fact = f"{ordinal(facts['today'])} game on {hero} today · {record}"
+        else:
+            fact = f"Played {fmt_when(row['ended_at'])} · {record}"
+        tw, tl = self.store.today_record()
+        return {
+            "result": {1: "VICTORY", 0: "DEFEAT"}.get(row["won"], "GAME OVER"),
+            "color": {1: ui.WIN, 0: ui.LOSS}.get(row["won"], ui.ACCENT),
+            "hero": hero,
+            "length": fmt_duration(row["duration"]),
+            "kda_parts": (row["kills"], row["deaths"], row["assists"]),
+            "chips": [f"{row['gpm']} GPM", f"{row['xpm']} XPM",
+                      f"{row['last_hits']} LH", f"Lvl {row['level']}"],
+            "fact": fact,
+            "today": f"Today  {tw} - {tl}",
+            "mode": mode_label(row),
+        }
+
+    def show_recap(self, match_id):
+        row = self.store.get(match_id)
+        if row is None:
+            return
+        self.close_card()
+        panel_mode = self.settings["recap_mode"] == "panel"
+        self.card = ui.RecapCard(self.recap_info(row),
+                                 self.portrait(row["hero_internal"]),
+                                 self._card_closed,
+                                 anchor=self.panel if panel_mode else None,
+                                 timeout=None if panel_mode else 20)
+        self.card_match = match_id
+        self.card_hero = row["hero_internal"]
+
+    def _card_closed(self, card):
+        if self.card is card:
+            self.card = None
+            self.card_match = None
+
+    def close_card(self):
+        if self.card:
+            self.card.dismiss()
+
+    def show_last_recap(self):
+        rows = self.store.matches(limit=1)
+        if rows:
+            self.show_recap(rows[0]["match_id"])
+
+    # --- panel mode ------------------------------------------------------
+
+    def apply_recap_mode(self):
+        if self.settings["recap_mode"] == "panel":
+            if not self.panel:
+                self.panel = ui.TaskbarPanel(self.show_window,
+                                             self.show_last_recap, self.quit)
+            self.update_panel()
+        elif self.panel:
+            self.panel.close()
+            self.panel.deleteLater()
+            self.panel = None
+
+    def update_panel(self):
+        if not self.panel:
+            return
+        turbo = self.settings["turbo_only"]
+        tw, tl = self.store.today_record(turbo)
+        last = self.store.matches(turbo, limit=1)
+        if last:
+            r = last[0]
+            res = {1: "W", 0: "L"}.get(r["won"], "?")
+            color = {1: ui.WIN, 0: ui.LOSS}.get(r["won"], ui.MUTED)
+            tail = (f"{self.hero_name(r['hero_internal'])} {res}  "
+                    f"{r['kills']}/{r['deaths']}/{r['assists']}")
+        else:
+            color, tail = ui.MUTED, "no games yet"
+        self.panel_idle = (f"Today {tw}-{tl}", tail, color, ui.ACCENT)
+        self.update_status()
+
+    def _pin(self):
+        # Skip while the panel's menu is open, or the pin buries it (bug #4).
+        if self.panel and not self.panel.menu_open:
+            winutil.pin_topmost(int(self.panel.winId()))
+        if self.card:
+            winutil.pin_topmost(int(self.card.winId()))
+
+    # --- options and lifetime ---------------------------------------------
+
+    def set_filter(self, key):
+        self.settings["turbo_only"] = key == "turbo"
+        save_settings(self.settings)
+        self.refresh()
+
+    def set_recap_mode(self, key):
+        self.settings["recap_mode"] = key
+        save_settings(self.settings)
+        self.close_card()
+        self.apply_recap_mode()
+
+    def show_window(self):
+        self.window.showNormal()
+        self.window.raise_()
+        self.window.activateWindow()
+
+    def on_window_closed(self):
+        # In panel mode the panel stays as the way back in; otherwise quit.
+        if self.panel:
+            self.window.hide()
+        else:
+            self.quit()
+
+    def quit(self):
+        if self.server:
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+        self.app.quit()
+
+
+def main():
+    if not acquire():
+        return
+    app = QApplication(sys.argv)
+    app.setApplicationName("Turbo Tracker")
+    app.setQuitOnLastWindowClosed(False)
+    ui.apply_theme(app)
+    ctl = Controller(app)   # noqa: F841 - keeps everything alive
+    sys.exit(app.exec())
+
+
+def acquire():
+    if winutil.acquire_single_instance():
+        return True
+    winutil.message_box("Turbo Tracker is already running.", "Turbo Tracker")
+    return False
+
+
+if __name__ == "__main__":
+    main()
