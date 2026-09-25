@@ -96,6 +96,18 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.pending_modes()), 2)
 
 
+class UpdateTests(unittest.TestCase):
+    def test_version_compare(self):
+        from updates import is_newer, parse_version
+        self.assertEqual(parse_version("v0.1.2"), (0, 1, 2))
+        self.assertIsNone(parse_version("v1.0-beta"))
+        self.assertTrue(is_newer("v0.1.10", "0.1.9"))   # not string order
+        self.assertTrue(is_newer("1.0.0", "0.9.9"))
+        self.assertFalse(is_newer("v0.1.1", "0.1.1"))
+        self.assertFalse(is_newer("v0.1.0", "0.1.1"))
+        self.assertFalse(is_newer("garbage", "0.1.1"))
+
+
 class VersionTests(unittest.TestCase):
     def test_version_line_matches_build_regex(self):
         # tools/project.ps1 reads the version with this same pattern

@@ -79,6 +79,10 @@ it sees: *Waiting for Dota*, *Dota is running*, or live **In game** stats.
 
     ![Taskbar panel: Today 3-2, Pudge W 14/5/21](docs/panel.png)
 - **Show last recap** brings back the card for your latest game.
+- **Updates**: at start and every few hours it asks GitHub whether a newer
+  release is out. If so, a green banner offers **Download** (opens the
+  release page in your browser) or **Later** (stay quiet about that
+  version). It never downloads or installs anything by itself.
 
 ### How it knows a game was Turbo
 
@@ -106,8 +110,9 @@ a few hours of trying they become *Practice / lobby* and never count in
 
 Everything stays on your PC: in `%LOCALAPPDATA%\TurboTracker` for the
 installed version, or the `data` folder beside a portable exe. The only
-things sent anywhere are match ids to OpenDota (to look up the mode) and
-downloads of hero names and pictures.
+things sent anywhere are match ids to OpenDota (to look up the mode),
+downloads of hero names and pictures, and a check of this repo's latest
+release on GitHub.
 
 To uninstall completely, also delete
 `gamestate_integration_turbotracker.cfg` from Dota's

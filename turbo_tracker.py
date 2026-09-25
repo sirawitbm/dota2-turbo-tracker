@@ -16,19 +16,22 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import QApplication
 
 import opendota
 import setup_gsi
 import ui
+import updates
 import winutil
 from gsi import MatchWatcher
 from paths import DATA as LOCAL, DB_PATH, HEROES_CACHE, PORTRAITS, SETTINGS
 from store import Store, start_of_today
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
+
+UPDATE_EVERY_MS = 6 * 3600 * 1000   # re-check GitHub for a new release
 
 # How long after a match to ask OpenDota for its game mode. Valve publishes
 # matches a few minutes after they end; bot/lobby games never appear.
@@ -169,6 +172,7 @@ class Controller:
         self.listen_error = None
         self.server = None
         self._repaired = False
+        self.update = None          # (version, url) of a newer release
         self.version = __version__
 
         try:
@@ -192,6 +196,7 @@ class Controller:
         self._timer(150, self._poll)
         self._timer(30000, self._check_modes, first=3000)
         self._timer(2000, self._pin)
+        self._timer(UPDATE_EVERY_MS, self._check_update, first=5000)
 
     def _timer(self, interval, fn, first=None):
         t = QTimer(self.app)
@@ -412,6 +417,8 @@ class Controller:
                     repaint = True
                     if self.card and self.card_hero == payload:
                         self.card.set_pixmap(self.portrait(payload))
+                elif kind == "update":
+                    self._update_result(payload)
                 elif kind == "mode":
                     self._mode_result(*payload)
                     changed = True
@@ -423,6 +430,41 @@ class Controller:
             self.window.matches.repaint_rows()
             self.window.heroes.repaint_rows()
         self.update_status()
+
+    # --- update check ---------------------------------------------------
+
+    def _check_update(self):
+        threading.Thread(target=lambda: self.inbox.put(
+            ("update", updates.latest_release())), daemon=True).start()
+
+    def _update_result(self, result):
+        if not result:
+            return                      # offline or GitHub hiccup: try later
+        version, url = result
+        if (updates.is_newer(version, __version__)
+                and self.settings.get("skip_update") != version):
+            self.update = (version, url)
+        else:
+            self.update = None
+        self._show_update()
+
+    def _show_update(self):
+        version = self.update[0] if self.update else None
+        self.window.set_update(version, __version__)
+        if self.panel:
+            self.panel.set_update(version, self.open_update)
+
+    def open_update(self):
+        if self.update:
+            QDesktopServices.openUrl(QUrl(self.update[1]))
+
+    def skip_update(self):
+        """Later: stay quiet about this version (a newer one still shows)."""
+        if self.update:
+            self.settings["skip_update"] = self.update[0]
+            save_settings(self.settings)
+        self.update = None
+        self._show_update()
 
     # --- OpenDota game-mode lookups --------------------------------------
 
@@ -517,6 +559,7 @@ class Controller:
                     self.show_window, self.show_last_recap, self.quit,
                     saved_pos=self.settings.get("panel_pos"),
                     on_moved=self._panel_moved)
+                self._show_update()
             self.update_panel()
         elif self.panel:
             self.panel.close()
@@ -582,9 +625,12 @@ class Controller:
             self.quit()
 
     def quit(self):
+        self.quitting = True
         if self.server:
             threading.Thread(target=self.server.shutdown, daemon=True).start()
-        self.app.quit()
+        # exit() rather than quit(): Qt 6's quit() first asks every window
+        # to close and silently gives up if one says no.
+        self.app.exit(0)
 
 
 def main():

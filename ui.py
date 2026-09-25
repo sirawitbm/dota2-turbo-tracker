@@ -57,6 +57,10 @@ QFrame#banner {{ background: rgba(255,159,67,0.09);
                 border: 1px solid rgba(255,159,67,0.35);
                 border-radius: 12px; }}
 QLabel#bannerText {{ color: #ffd6a8; font-size: 13px; }}
+QFrame#update {{ background: rgba(52,211,153,0.08);
+                border: 1px solid rgba(52,211,153,0.35);
+                border-radius: 12px; }}
+QLabel#updateText {{ color: #b9f3dc; font-size: 13px; }}
 QFrame#seg {{ background: {SURFACE}; border: 1px solid {BORDER};
              border-radius: 12px; }}
 QPushButton#segbtn {{ background: transparent; color: {MUTED}; border: none;
@@ -531,6 +535,19 @@ class MainWindow(QWidget):
         self.banner.hide()
         root.addWidget(self.banner)
 
+        # update available (hidden until a newer release is found)
+        self.update_bar = QFrame()
+        self.update_bar.setObjectName("update")
+        urow = QHBoxLayout(self.update_bar)
+        urow.setContentsMargins(16, 10, 12, 10)
+        urow.setSpacing(8)
+        self.update_text = label("", "updateText")
+        urow.addWidget(self.update_text, 1)
+        urow.addWidget(button("Later", "ghost", ctl.skip_update))
+        urow.addWidget(button("Download", "primary", ctl.open_update))
+        self.update_bar.hide()
+        root.addWidget(self.update_bar)
+
         # stat tiles
         tiles = QHBoxLayout()
         tiles.setSpacing(14)
@@ -591,11 +608,25 @@ class MainWindow(QWidget):
         self.banner_btn.setVisible(show_button)
         self.banner.show()
 
+    def set_update(self, version, current):
+        if not version:
+            self.update_bar.hide()
+            return
+        self.update_text.setText(
+            f"Turbo Tracker {version} is out  ·  you have {current}")
+        self.update_bar.show()
+
     def showEvent(self, event):
         super().showEvent(event)
         winutil.dark_title_bar(int(self.winId()))
 
     def closeEvent(self, event):
+        # The close button is routed to the controller (hide in panel mode,
+        # quit otherwise). But when the app itself is quitting this must say
+        # yes: Qt 6 cancels a quit if any window refuses to close.
+        if getattr(self.ctl, "quitting", False):
+            event.accept()
+            return
         event.ignore()
         self.closed.emit()
 
@@ -907,6 +938,12 @@ class TaskbarPanel(QWidget):
         self.menu.addAction("Open Turbo Tracker", on_open)
         self.menu.addAction("Show last recap", on_recap)
         self.menu.addAction("Move back to the taskbar", self.reset_position)
+        # Shown only when a newer release exists (main window may be hidden
+        # in panel mode, so its banner alone could go unseen).
+        self._on_update = None
+        self.update_action = self.menu.addAction(
+            "Update available", lambda: self._on_update and self._on_update())
+        self.update_action.setVisible(False)
         self.menu.addSeparator()
         self.menu.addAction("Quit", on_quit)
         self.menu.aboutToHide.connect(lambda: setattr(self, "menu_open", False))
@@ -955,6 +992,12 @@ class TaskbarPanel(QWidget):
                         for v in pos)):
             return False
         return QGuiApplication.screenAt(QPoint(pos[0], pos[1] + 8)) is not None
+
+    def set_update(self, version, on_click):
+        self._on_update = on_click if version else None
+        self.update_action.setVisible(bool(version))
+        if version:
+            self.update_action.setText(f"Download update {version}")
 
     def reset_position(self):
         self.custom = None
