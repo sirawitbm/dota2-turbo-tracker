@@ -571,6 +571,8 @@ class MainWindow(QWidget):
                                 "turbo" if ctl.settings["turbo_only"] else "all")
         self.filter.changed.connect(ctl.set_filter)
         bar.addWidget(self.filter)
+        bar.addSpacing(10)
+        bar.addWidget(button("Show last recap", "ghost", ctl.show_last_recap))
         root.addLayout(bar)
 
         # lists
@@ -595,7 +597,7 @@ class MainWindow(QWidget):
         self.recap.changed.connect(ctl.set_recap_mode)
         foot.addWidget(self.recap)
         foot.addSpacing(22)
-        foot.addWidget(label("TIPS WHEN DEAD", "caption"))
+        foot.addWidget(label("IN-GAME TIPS", "caption"))
         foot.addSpacing(6)
         choices = [("Off", "off"), ("Game screen", "game")]
         if len(QGuiApplication.screens()) > 1:
@@ -603,8 +605,12 @@ class MainWindow(QWidget):
         self.tips = Segmented(choices, ctl.settings["tips"])
         self.tips.changed.connect(ctl.set_tips)
         foot.addWidget(self.tips)
+        foot.addSpacing(8)
+        self.tips_size = Segmented([("Full", "full"), ("Small", "small")],
+                                   ctl.settings["tips_size"])
+        self.tips_size.changed.connect(ctl.set_tips_size)
+        foot.addWidget(self.tips_size)
         foot.addStretch()
-        foot.addWidget(button("Show last recap", "ghost", ctl.show_last_recap))
         root.addLayout(foot)
 
     def _switch_tab(self, key):
@@ -1014,6 +1020,7 @@ class TipsCard(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.icon_for = icon_for
         self._sig = None
+        self.compact = False
         self.setFixedWidth(self.WIDTH)
 
         self.box = QVBoxLayout(self)
@@ -1023,6 +1030,12 @@ class TipsCard(QWidget):
         self.headline = label("")
         self.headline.setStyleSheet("font-size: 15px; font-weight: 700;")
         head.addWidget(self.headline)
+        # Small size: the item names go on this same line instead.
+        self.line = label("")
+        self.line.setStyleSheet(f"font-size: 13px; color: {TEXT};")
+        self.line.hide()
+        head.addSpacing(10)
+        head.addWidget(self.line)
         head.addStretch()
         self.context = label("")
         self.context.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
@@ -1038,7 +1051,45 @@ class TipsCard(QWidget):
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         p.setPen(QPen(QColor(BORDER), 1))
         p.setBrush(tint(BG, 235))
-        p.drawRoundedRect(r, 16, 16)
+        radius = r.height() / 2 if self.compact else 16
+        p.drawRoundedRect(r, radius, radius)
+
+    def set_compact(self, compact):
+        """Full card with item pictures, or one slim line of text."""
+        if compact == self.compact:
+            return
+        self.compact = compact
+        self._sig = None                    # force a rebuild
+        self.line.setVisible(compact)
+        self.context.setVisible(not compact)
+        if compact:
+            self.box.setContentsMargins(18, 8, 20, 8)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+        else:
+            self.box.setContentsMargins(22, 16, 22, 18)
+            self.setFixedWidth(self.WIDTH)
+        self.update()
+
+    def _fit(self):
+        # setText only *posts* a relayout; without activating it first,
+        # adjustSize measures the old text and the new one gets clipped.
+        self.box.invalidate()
+        self.box.activate()
+        self.adjustSize()
+
+    @staticmethod
+    def compact_text(rec, message):
+        """The popular items you don't have yet, in one line."""
+        if message or not rec:
+            return message or "No item data yet"
+        todo = [it["name"] for it in rec["now"] if not it["owned"]][:3]
+        if todo:
+            return "Next: " + "  ·  ".join(todo)
+        later = [it["name"] for it in rec["next"]][:3]
+        if later:
+            return "Later: " + "  ·  ".join(later)
+        return "You have the popular items"
 
     def set_headline(self, text, color):
         self.headline.setText(text)
@@ -1048,10 +1099,15 @@ class TipsCard(QWidget):
     def set_content(self, context, rec, message=None):
         """rec from builds.recommend(); rebuilt only when it changes."""
         self.context.setText(context)
-        sig = (message, repr(rec) if rec else None)
+        sig = (message, repr(rec) if rec else None, self.compact)
         if sig == self._sig:
             return
         self._sig = sig
+        if self.compact:
+            self.line.setText(self.compact_text(rec, message))
+            self.body.hide()
+            self._fit()
+            return
         self.box.removeWidget(self.body)
         self.body.deleteLater()
         self.body = QWidget()
@@ -1071,7 +1127,7 @@ class TipsCard(QWidget):
                     f"COMING UP · {rec['next_stage'].upper()}"))
                 lay.addLayout(self._row(rec["next"], self.SMALL))
         self.box.addWidget(self.body)
-        self.adjustSize()
+        self._fit()
 
     def refresh_icons(self):
         for tile in self.body.findChildren(ItemTile):
@@ -1098,7 +1154,7 @@ class TipsCard(QWidget):
         screens = QGuiApplication.screens()
         primary = QGuiApplication.primaryScreen()
         others = [s for s in screens if s is not primary]
-        self.adjustSize()
+        self._fit()
         if where == "second" and others:
             g = others[0].availableGeometry()
             self.move(g.center().x() - self.width() // 2,
@@ -1107,6 +1163,105 @@ class TipsCard(QWidget):
         g = primary.geometry()
         self.move(g.center().x() - self.width() // 2,
                   g.top() + int(g.height() * 0.10))
+
+
+class ItemToast(QWidget):
+    """A small note by Dota's kill feed after you finish an item, with the
+    next three popular buys. Click-through, never takes focus, gone after
+    a few seconds."""
+
+    SECONDS = 7
+    ICON = QSize(40, 29)
+
+    def __init__(self, icon_for):
+        super().__init__(None, FLOAT_FLAGS | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.icon_for = icon_for
+        self.item = None
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 6, 16, 6)
+        row.setSpacing(10)
+        self.icon = QLabel()
+        self.icon.setFixedSize(self.ICON)
+        row.addWidget(self.icon)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        self.done = label("")
+        self.done.setStyleSheet(f"color: {WIN}; font-size: 13px; font-weight: 700;")
+        self.next = label("")
+        self.next.setStyleSheet(f"color: {TEXT}; font-size: 12px;")
+        text.addWidget(self.done)
+        text.addWidget(self.next)
+        row.addLayout(text)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._fade_out)
+        self._fade = None
+        self.hide()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(tint(WIN, 90), 1))
+        p.setBrush(tint(BG, 230))
+        p.drawRoundedRect(r, 12, 12)
+
+    def _set_icon(self):
+        pix = self.icon_for(self.item) if self.item else None
+        canvas = QPixmap(self.ICON * self.devicePixelRatioF())
+        canvas.setDevicePixelRatio(self.devicePixelRatioF())
+        canvas.fill(Qt.transparent)
+        p = QPainter(canvas)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        draw_portrait(p, QRect(QPoint(0, 0), self.ICON), pix,
+                      self.item["name"] if self.item else "", radius=5)
+        p.end()
+        self.icon.setPixmap(canvas)
+
+    def refresh_icons(self):
+        if self.isVisible() and self.item:
+            self._set_icon()
+
+    def show_item(self, item, upcoming, where):
+        self.item = item
+        self.done.setText(f"✓  {item['name']} done")
+        names = [it["name"] for it in upcoming]
+        self.next.setText("Next: " + "  ·  ".join(names) if names
+                          else "You have the popular items")
+        self._set_icon()
+        if self._fade:
+            self._fade.stop()
+        self.setWindowOpacity(1.0)
+        self.layout().invalidate()
+        self.layout().activate()
+        self.adjustSize()
+        self.place(where)
+        self.show()
+        winutil.pin_topmost(int(self.winId()))
+        self._timer.start(self.SECONDS * 1000)
+
+    def place(self, where):
+        """Left edge, where Dota's kill feed is; on a second monitor, its
+        top-left corner."""
+        primary = QGuiApplication.primaryScreen()
+        others = [s for s in QGuiApplication.screens() if s is not primary]
+        if where == "second" and others:
+            g = others[0].availableGeometry()
+            self.move(g.left() + 24, g.top() + 24)
+            return
+        g = primary.geometry()
+        self.move(g.left() + 12, g.top() + int(g.height() * 0.30))
+
+    def _fade_out(self):
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.setDuration(350)
+        self._fade.setStartValue(1.0)
+        self._fade.setEndValue(0.0)
+        self._fade.finished.connect(self.hide)
+        self._fade.start()
 
 
 # ---------------------------------------------------------------------------

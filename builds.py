@@ -66,7 +66,7 @@ def load_items(path, allow_fetch=True):
     week. Returns the stale cache (or None) if the network is down."""
     if _fresh(path, ITEMS_MAX_AGE) or not allow_fetch:
         cached = _read(path)
-        if cached and all("components" in v for v in cached.values()):
+        if cached and all("created" in v for v in cached.values()):
             return cached
     try:
         raw = opendota._get("/constants/items")
@@ -81,7 +81,8 @@ def load_items(path, allow_fetch=True):
                 "cost": v.get("cost") or 0, "qual": v.get("qual"),
                 "img": opendota.CDN + img if img else "",
                 "components": [c for c in (v.get("components") or [])
-                               if isinstance(c, str)]}
+                               if isinstance(c, str)],
+                "created": bool(v.get("created"))}
     _write(path, items)
     return items
 
@@ -168,3 +169,26 @@ def recommend(pop, items, clock, owned):
         result["next"] = [dict(it, owned=False)
                           for it in top_items(pop, items, nstage, 4, skip)]
     return result
+
+
+def is_finished(key, items):
+    """True for an item worth announcing when bought: something built from
+    parts (Phase Boots, Aghanim's, Sange) or a big single item (Blink
+    Dagger, Ultimate Orb). Not parts like Ogre Axe, consumables, recipes
+    or neutral items."""
+    item = next((it for it in (items or {}).values() if it["key"] == key),
+                None)
+    if key == "aghanims_shard":
+        return True
+    if not _useful(item, "mid"):
+        return False
+    return bool(item.get("created")) or item["cost"] >= 2000
+
+
+def next_buys(rec, n=3):
+    """Up to n popular items not owned yet: this stage first, then next."""
+    if not rec:
+        return []
+    out = [it for it in rec["now"] if not it["owned"]]
+    out += [it for it in rec["next"] if it not in out]
+    return out[:n]

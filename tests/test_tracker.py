@@ -140,6 +140,26 @@ class BuildTests(unittest.TestCase):
         start = recommend(self.POP, self.ITEMS, -30, set())
         self.assertEqual([i["key"] for i in start["now"]], ["boots"])  # no tango
 
+    def test_finished_items(self):
+        from builds import is_finished
+        items = {k: dict(v, created=v["key"] == "ultimate_scepter")
+                 for k, v in self.ITEMS.items()}
+        self.assertTrue(is_finished("ultimate_scepter", items))   # built
+        self.assertTrue(is_finished("blink", items))              # big single
+        self.assertFalse(is_finished("ogre_axe", items))          # a part
+        self.assertFalse(is_finished("tango", items))             # consumable
+        self.assertFalse(is_finished("recipe_x", items))
+        self.assertFalse(is_finished("magic_wand", items))        # cheap
+        self.assertFalse(is_finished("not_an_item", items))
+
+    def test_next_buys_skips_owned(self):
+        from builds import next_buys, recommend
+        rec = recommend(self.POP, self.ITEMS, 60, {"boots"})
+        # this stage first (not owned), then the next stage fills it up
+        self.assertEqual([i["key"] for i in next_buys(rec, 3)],
+                         ["magic_wand", "blink", "ultimate_scepter"])
+        self.assertEqual(next_buys(None), [])
+
     def test_no_data(self):
         from builds import recommend
         self.assertIsNone(recommend(None, self.ITEMS, 100, set()))

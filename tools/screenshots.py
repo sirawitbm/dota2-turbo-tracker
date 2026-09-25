@@ -43,6 +43,14 @@ setup_gsi.launch_option_set = lambda: True
 import turbo_tracker as tt  # noqa: E402
 import ui  # noqa: E402
 
+# Render everything off-screen: we only grab the widgets, and nothing should
+# pop up over whatever the user is doing (a Dota game, say).
+_OFF = lambda self, *a, **k: self.move(-9000, -9000)
+ui.RecapCard._place = _OFF
+ui.TaskbarPanel._place = _OFF
+ui.TipsCard.place = _OFF
+ui.ItemToast.place = _OFF
+
 H = "npc_dota_hero_"
 GAMES = [  # hero, won, k, d, a, minutes, gpm, xpm, lh, hours ago
     ("pudge", 1, 14, 5, 21, 19, 912, 1040, 118, 0.3),

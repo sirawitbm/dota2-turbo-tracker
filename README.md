@@ -85,13 +85,19 @@ right-click the tray icon > **Quit**.
 
     ![Taskbar panel: Today 3-2, Pudge W 14/5/21](docs/panel.png)
 - **Show last recap** brings back the card for your latest game.
-- **Tips when dead**: while you're dead or the game is paused, a small
+- **In-game tips** (when dead): while you're dead or the game is paused, a small
   card like Dota's pause tips shows the items most bought on your hero at
   this stage of the game - ticked if you already have them - and what's
   coming up next. It disappears the instant you respawn or buy back, and
   it's click-through and never takes focus, so it can't get in the way.
   Pick *Game screen* (top middle), *2nd screen* (if you have one) or
-  *Off*. Picking one shows a 6-second preview.
+  *Off*, and *Full* (item pictures) or *Small* (one line of text).
+  Picking one shows a 6-second preview.
+- **Finished-item note**: when you complete an item, a small note appears
+  on the left where the kill feed is, for 7 seconds: *"Monkey King Bar
+  done - Next: Black King Bar, Hurricane Pike, Orchid"*. Also
+  click-through. Parts, consumables and neutral items don't count. It
+  follows the tips setting (*Off* turns it off too).
 
   ![Tips card while dead: respawn in 18s, popular mid-game items for Juggernaut with owned ones ticked, and late-game items coming up](docs/tips.png)
 

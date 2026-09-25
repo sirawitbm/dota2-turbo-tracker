@@ -32,7 +32,7 @@ from paths import (DATA as LOCAL, DB_PATH, HEROES_CACHE, INSTANCE, PORTRAITS,
                    SETTINGS)
 from store import Store, start_of_today
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 UPDATE_EVERY_MS = 6 * 3600 * 1000   # re-check GitHub for a new release
 
@@ -56,6 +56,8 @@ def load_settings():
         settings["turbo_only"] = False
     if settings.get("tips") not in ("off", "game", "second"):
         settings["tips"] = "game"
+    if settings.get("tips_size") not in ("full", "small"):
+        settings["tips_size"] = "full"
     return settings
 
 
@@ -200,6 +202,9 @@ class Controller:
 
         # Tips card while dead / paused, fed by OpenDota item popularity.
         self.tips = ui.TipsCard(self.item_icon)
+        self.tips.set_compact(self.settings["tips_size"] == "small")
+        self.toast = ui.ItemToast(self.item_icon)
+        self.owned_seen = (None, set())     # (match id, items last seen)
         self.items_db = None
         self.pops = {}              # hero id -> item popularity
         self.pop_fetching = set()
@@ -444,6 +449,7 @@ class Controller:
                     if first:
                         self.update_banner()
                     match = self.watcher.feed(payload)
+                    self._check_new_items()
                     if match and self.store.add_match(match):
                         changed = True
                         self.show_recap(match["match_id"])
@@ -460,8 +466,10 @@ class Controller:
                     repaint = True
                     if self.card and self.card_hero == payload:
                         self.card.set_pixmap(self.portrait(payload))
-                    if payload.startswith("item:") and self.tips.isVisible():
-                        self.tips.refresh_icons()
+                    if payload.startswith("item:"):
+                        if self.tips.isVisible():
+                            self.tips.refresh_icons()
+                        self.toast.refresh_icons()
                 elif kind == "itemsdb":
                     self.items_db = payload
                 elif kind == "pop":
@@ -540,6 +548,29 @@ class Controller:
             self.tips.show()
             winutil.pin_topmost(int(self.tips.winId()))
 
+    def _check_new_items(self):
+        """After each Dota message: did you just finish an item? The first
+        look at a match only records what you have, so opening the app
+        mid-game doesn't announce your whole inventory."""
+        live = self.watcher.status()
+        if not live or live["state"] != LIVE_STATES[0]:
+            return
+        owned = set(live.get("owned") or ())
+        match_id, before = self.owned_seen
+        self.owned_seen = (live["match_id"], owned)
+        if match_id != live["match_id"] or self.settings["tips"] == "off":
+            return
+        new = [k for k in owned - before
+               if builds.is_finished(k, self.items_db)]
+        if not new:
+            return
+        by_key = {it["key"]: it for it in (self.items_db or {}).values()}
+        item = by_key[new[0]]
+        rec = builds.recommend(self.pops.get(live.get("hero_id")),
+                               self.items_db, live["clock"], owned)
+        self.toast.show_item(item, builds.next_buys(rec, 3),
+                             self.settings["tips"])
+
     def _preview_live(self):
         """Stand-in game state for the preview shown when you pick a tips
         option: your last hero, dead at 10:00."""
@@ -552,10 +583,20 @@ class Controller:
                 "alive": False, "respawn": 23, "paused": False,
                 "owned": set(), "state": LIVE_STATES[0]}
 
+    def set_tips_size(self, key):
+        self.settings["tips_size"] = key
+        save_settings(self.settings)
+        self.tips.hide()
+        self.tips.set_compact(key == "small")
+        if self.settings["tips"] != "off":
+            self.tips_preview_until = time.time() + 6
+        self.update_status()
+
     def set_tips(self, key):
         self.settings["tips"] = key
         save_settings(self.settings)
         self.tips.hide()
+        self.toast.hide()
         # Show where it will appear for a few seconds.
         self.tips_preview_until = time.time() + 6 if key != "off" else 0
         self.update_status()
@@ -731,6 +772,8 @@ class Controller:
             winutil.pin_topmost(int(self.card.winId()))
         if self.tips.isVisible():
             winutil.pin_topmost(int(self.tips.winId()))
+        if self.toast.isVisible():
+            winutil.pin_topmost(int(self.toast.winId()))
 
     # --- options and lifetime ---------------------------------------------
 
