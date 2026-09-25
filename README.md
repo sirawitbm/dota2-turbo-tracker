@@ -93,6 +93,12 @@ right-click the tray icon > **Quit**.
   Pick *Game screen* (top middle), *2nd screen* (if you have one) or
   *Off*, and *Full* (item pictures) or *Small* (one line of text).
   Picking one shows a 6-second preview.
+
+  Dead for a while and want to watch the fight? **Move your mouse onto
+  the full card** and it shrinks to one line, or press **Ctrl+Shift+T**
+  to switch Full/Small either way. The shortcut only exists while the
+  card is showing, so it doesn't take the keys from Dota the rest of the
+  time. Your next death starts at your chosen size again.
 - **Finished-item note**: when you complete an item, a small note appears
   on the left where the kill feed is, for 7 seconds: *"Monkey King Bar
   done - Next: Black King Bar, Hurricane Pike, Orchid"*. Also

@@ -5,7 +5,8 @@ No game logic here - turbo_tracker.py feeds these widgets plain dicts.
 
 from PySide6.QtCore import (QEasingCurve, QPoint, QPropertyAnimation, QRect,
                             QRectF, QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication,
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
+                           QGuiApplication,
                            QIcon, QLinearGradient, QPainter, QPainterPath,
                            QPalette, QPen, QPixmap, QStandardItem,
                            QStandardItemModel)
@@ -1021,6 +1022,8 @@ class TipsCard(QWidget):
         self.icon_for = icon_for
         self._sig = None
         self.compact = False
+        self.on_hotkey = None
+        self.hotkey_on = False
         self.setFixedWidth(self.WIDTH)
 
         self.box = QVBoxLayout(self)
@@ -1126,8 +1129,36 @@ class TipsCard(QWidget):
                 lay.addWidget(self._caption(
                     f"COMING UP · {rec['next_stage'].upper()}"))
                 lay.addLayout(self._row(rec["next"], self.SMALL))
+            hint = label("Mouse over or Ctrl+Shift+T to shrink")
+            hint.setStyleSheet(f"color: {SUBTLE}; font-size: 10px;")
+            lay.addWidget(hint, 0, Qt.AlignRight)
         self.box.addWidget(self.body)
         self._fit()
+
+    HOTKEY_ID = 0x7454          # any app-unique number
+    HOTKEY_VK = 0x54            # T  (with Ctrl+Shift)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Listen for Ctrl+Shift+T only while the card is up, so the combo
+        # is free the rest of the time.
+        self.hotkey_on = winutil.register_hotkey(
+            int(self.winId()), self.HOTKEY_ID, self.HOTKEY_VK)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self.hotkey_on:
+            winutil.unregister_hotkey(int(self.winId()), self.HOTKEY_ID)
+            self.hotkey_on = False
+
+    def nativeEvent(self, event_type, message):
+        if winutil.hotkey_id_of(message) == self.HOTKEY_ID and self.on_hotkey:
+            self.on_hotkey()
+            return True, 0
+        return False, 0
+
+    def pointer_over(self):
+        return self.isVisible() and self.geometry().contains(QCursor.pos())
 
     def refresh_icons(self):
         for tile in self.body.findChildren(ItemTile):

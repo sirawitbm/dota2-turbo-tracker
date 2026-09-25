@@ -34,6 +34,11 @@ if os.name == "nt":
     U.MessageBoxW.argtypes = (wintypes.HWND, wintypes.LPCWSTR,
                               wintypes.LPCWSTR, wintypes.UINT)
     U.MessageBoxW.restype = ctypes.c_int
+    U.RegisterHotKey.argtypes = (wintypes.HWND, ctypes.c_int, wintypes.UINT,
+                                 wintypes.UINT)
+    U.RegisterHotKey.restype = wintypes.BOOL
+    U.UnregisterHotKey.argtypes = (wintypes.HWND, ctypes.c_int)
+    U.UnregisterHotKey.restype = wintypes.BOOL
     K.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL,
                                wintypes.LPCWSTR)
     K.CreateMutexW.restype = wintypes.HANDLE
@@ -97,6 +102,42 @@ def acquire_single_instance(name="Local\\TurboTracker"):
         return False
     _INSTANCE_HANDLE = handle
     return True
+
+
+WM_HOTKEY = 0x0312
+MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 0x0002, 0x0004, 0x4000
+
+
+def register_hotkey(hwnd, hotkey_id, vk, mods=MOD_CONTROL | MOD_SHIFT):
+    """Ask Windows to tell this window when a key combo is pressed anywhere.
+    It only listens - nothing is sent to the game. False if another app
+    already owns the combo."""
+    if os.name != "nt":
+        return False
+    try:
+        return bool(U.RegisterHotKey(hwnd, hotkey_id, mods | MOD_NOREPEAT, vk))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def unregister_hotkey(hwnd, hotkey_id):
+    if os.name != "nt":
+        return
+    try:
+        U.UnregisterHotKey(hwnd, hotkey_id)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def hotkey_id_of(message):
+    """The hotkey id if a native Windows message is WM_HOTKEY, else None."""
+    if os.name != "nt":
+        return None
+    try:
+        msg = wintypes.MSG.from_address(int(message))
+    except (TypeError, ValueError, OSError):
+        return None
+    return int(msg.wParam) if msg.message == WM_HOTKEY else None
 
 
 def message_box(text, title):

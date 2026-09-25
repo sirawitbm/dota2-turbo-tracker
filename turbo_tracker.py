@@ -32,7 +32,7 @@ from paths import (DATA as LOCAL, DB_PATH, HEROES_CACHE, INSTANCE, PORTRAITS,
                    SETTINGS)
 from store import Store, start_of_today
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 UPDATE_EVERY_MS = 6 * 3600 * 1000   # re-check GitHub for a new release
 
@@ -203,6 +203,9 @@ class Controller:
         # Tips card while dead / paused, fed by OpenDota item popularity.
         self.tips = ui.TipsCard(self.item_icon)
         self.tips.set_compact(self.settings["tips_size"] == "small")
+        self.tips.on_hotkey = self._tips_hotkey
+        self.tips_flipped = False   # shrunk/grown for this death only
+        self._hover_armed = False   # see update_tips
         self.toast = ui.ItemToast(self.item_icon)
         self.owned_seen = (None, set())     # (match id, items last seen)
         self.items_db = None
@@ -519,7 +522,23 @@ class Controller:
         if where == "off" or not (waiting or preview):
             if self.tips.isVisible():
                 self.tips.hide()
+            self.tips_flipped = False       # next death starts at your size
+            self._hover_armed = False
             return
+        small = (self.settings["tips_size"] == "small") != self.tips_flipped
+        # Mouse moving onto the full card = "get out of my way": shrink it.
+        # "Armed" only once the pointer has been off the full card since it
+        # appeared or was last grown, so the card never shrinks just because
+        # it popped up under a resting mouse, or right after Ctrl+Shift+T.
+        if not small and self.tips.isVisible() and not self.tips.compact:
+            over = self.tips.pointer_over()
+            if over and self._hover_armed:
+                self.tips_flipped = not self.tips_flipped
+                self._hover_armed = False
+                small = True
+            elif not over:
+                self._hover_armed = True
+        self.tips.set_compact(small)
         if not waiting:
             live = self._preview_live()
         hero_id = live.get("hero_id")
@@ -571,6 +590,15 @@ class Controller:
         self.toast.show_item(item, builds.next_buys(rec, 3),
                              self.settings["tips"])
 
+    def _tips_hotkey(self):
+        """Ctrl+Shift+T while the card is up: swap Full <-> Small."""
+        self.tips_flipped = not self.tips_flipped
+        # Growing the card can put it under a pointer that was resting just
+        # below the small line; don't let that count as "mouse moved onto
+        # it" and shrink it straight back. The pointer has to leave first.
+        self._hover_armed = False
+        self.update_status()
+
     def _preview_live(self):
         """Stand-in game state for the preview shown when you pick a tips
         option: your last hero, dead at 10:00."""
@@ -587,6 +615,7 @@ class Controller:
         self.settings["tips_size"] = key
         save_settings(self.settings)
         self.tips.hide()
+        self.tips_flipped = False
         self.tips.set_compact(key == "small")
         if self.settings["tips"] != "off":
             self.tips_preview_until = time.time() + 6
