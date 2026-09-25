@@ -513,8 +513,10 @@ class Controller:
     def apply_recap_mode(self):
         if self.settings["recap_mode"] == "panel":
             if not self.panel:
-                self.panel = ui.TaskbarPanel(self.show_window,
-                                             self.show_last_recap, self.quit)
+                self.panel = ui.TaskbarPanel(
+                    self.show_window, self.show_last_recap, self.quit,
+                    saved_pos=self.settings.get("panel_pos"),
+                    on_moved=self._panel_moved)
             self.update_panel()
         elif self.panel:
             self.panel.close()
@@ -538,9 +540,18 @@ class Controller:
         self.panel_idle = (f"Today {tw}-{tl}", tail, color, ui.ACCENT)
         self.update_status()
 
+    def _panel_moved(self, pos):
+        """The panel was dragged (pos = [centre x, top y]) or reset (None)."""
+        if pos is None:
+            self.settings.pop("panel_pos", None)
+        else:
+            self.settings["panel_pos"] = list(pos)
+        save_settings(self.settings)
+
     def _pin(self):
-        # Skip while the panel's menu is open, or the pin buries it (bug #4).
-        if self.panel and not self.panel.menu_open:
+        # Skip while the panel's menu is open, or the pin buries it (bug #4),
+        # and mid-drag.
+        if self.panel and not self.panel.menu_open and not self.panel.dragging:
             winutil.pin_topmost(int(self.panel.winId()))
         if self.card:
             winutil.pin_topmost(int(self.card.winId()))

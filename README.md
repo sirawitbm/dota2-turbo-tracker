@@ -73,6 +73,10 @@ it sees: *Waiting for Dota*, *Dota is running*, or live **In game** stats.
     and stays until clicked. Closing the main window keeps the panel; click
     it to reopen, right-click to quit.
 
+    In borderless windowed the taskbar is hidden, so the pill floats over
+    Dota's HUD. **Drag it** somewhere it's out of the way; it remembers the
+    spot. Right-click > *Move back to the taskbar* to reset it.
+
     ![Taskbar panel: Today 3-2, Pudge W 14/5/21](docs/panel.png)
 - **Show last recap** brings back the card for your latest game.
 

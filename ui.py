@@ -822,10 +822,17 @@ class RecapCard(QWidget):
         full, work, _ = primary_areas()
         m = self.SHADOW
         if anchor is not None and anchor.isVisible():
-            right = anchor.geometry().right() + m
-            x = min(right - self.width() + 1, work.right() - self.width() + m)
-        else:
-            x = work.right() - self.width() + m - 12
+            # Beside the panel, wherever it has been dragged: above it,
+            # or below if it sits near the top of the screen.
+            a = anchor.geometry()
+            x = a.center().x() - self.width() // 2
+            y = a.top() - self.height() + m - 8
+            if y < full.top():
+                y = a.bottom() - m + 8
+            x = max(full.left() - m, min(x, full.right() - self.width() + m))
+            self.move(x, y)
+            return
+        x = work.right() - self.width() + m - 12
         y = work.bottom() - self.height() + m - 12
         self.move(max(work.left(), x), y)
 
@@ -876,13 +883,22 @@ class RecapCard(QWidget):
 class TaskbarPanel(QWidget):
     MIN_W = 240
 
-    def __init__(self, on_open, on_recap, on_quit):
+    DRAG_START = 5   # pixels of movement before a press counts as a drag
+
+    def __init__(self, on_open, on_recap, on_quit, saved_pos=None,
+                 on_moved=None):
         super().__init__(None, FLOAT_FLAGS)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.on_open = on_open
+        self.on_moved = on_moved
         self.menu_open = False
+        self.dragging = False
+        self._press = None
         self._shown = None
+        # Where the user dragged it: (centre x, top y), kept as the centre so
+        # the pill grows evenly both ways when its text gets longer.
+        self.custom = saved_pos if self._valid(saved_pos) else None
         self.menu = QMenu()
         self.menu.setWindowFlags(self.menu.windowFlags()
                                  | Qt.FramelessWindowHint
@@ -890,6 +906,7 @@ class TaskbarPanel(QWidget):
         self.menu.setAttribute(Qt.WA_TranslucentBackground)
         self.menu.addAction("Open Turbo Tracker", on_open)
         self.menu.addAction("Show last recap", on_recap)
+        self.menu.addAction("Move back to the taskbar", self.reset_position)
         self.menu.addSeparator()
         self.menu.addAction("Quit", on_quit)
         self.menu.aboutToHide.connect(lambda: setattr(self, "menu_open", False))
@@ -929,10 +946,31 @@ class TaskbarPanel(QWidget):
         self.adjustSize()
         self._place()
 
+    @staticmethod
+    def _valid(pos):
+        """A saved (x, y) that is two real ints on some screen right now.
+        bool is a subclass of int, so rule it out explicitly."""
+        if not (isinstance(pos, (list, tuple)) and len(pos) == 2
+                and all(isinstance(v, int) and not isinstance(v, bool)
+                        for v in pos)):
+            return False
+        return QGuiApplication.screenAt(QPoint(pos[0], pos[1] + 8)) is not None
+
+    def reset_position(self):
+        self.custom = None
+        self._place()
+        if self.on_moved:
+            self.on_moved(None)
+
     def _place(self):
-        """On the taskbar, right edge just left of the tray icons."""
+        """Where the user dragged it, else on the taskbar just left of the
+        tray icons."""
         full, work, dpr = primary_areas()
         w = max(self.MIN_W, self.sizeHint().width())
+        if self.custom:
+            h = 32
+            self.setGeometry(self.custom[0] - w // 2, self.custom[1], w, h)
+            return
         bar_h = full.bottom() - work.bottom()
         if bar_h >= 24:                          # taskbar along the bottom
             h = min(32, bar_h - 10)
@@ -948,7 +986,43 @@ class TaskbarPanel(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.RightButton:
             self.menu_open = True
-            self.menu.popup(event.globalPosition().toPoint()
-                            - QPoint(0, self.menu.sizeHint().height() + 8))
-        else:
+            at = event.globalPosition().toPoint()
+            h = self.menu.sizeHint().height()
+            up = at - QPoint(0, h + 8)
+            self.menu.popup(up if up.y() >= 0 else at + QPoint(0, 8))
+        elif event.button() == Qt.LeftButton:
+            # Remember where the press landed; a click opens the app, a
+            # drag moves the pill (decided in mouseMove / mouseRelease).
+            self._press = (event.globalPosition().toPoint(), self.pos())
+
+    def mouseMoveEvent(self, event):
+        if not self._press:
+            return
+        start, origin = self._press
+        delta = event.globalPosition().toPoint() - start
+        if not self.dragging and delta.manhattanLength() < self.DRAG_START:
+            return
+        self.dragging = True
+        self.setCursor(Qt.ClosedHandCursor)
+        self.move(origin + delta)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton or not self._press:
+            return
+        self._press = None
+        if not self.dragging:
             self.on_open()
+            return
+        self.dragging = False
+        self.setCursor(Qt.PointingHandCursor)
+        # Keep it on screen, then remember it as (centre x, top y).
+        g = self.geometry()
+        screen = QGuiApplication.screenAt(g.center()) or \
+            QGuiApplication.primaryScreen()
+        area = screen.geometry()
+        x = max(area.left(), min(g.left(), area.right() - g.width() + 1))
+        y = max(area.top(), min(g.top(), area.bottom() - g.height() + 1))
+        self.custom = [x + g.width() // 2, y]
+        self._place()
+        if self.on_moved:
+            self.on_moved(self.custom)
