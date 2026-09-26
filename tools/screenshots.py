@@ -39,6 +39,7 @@ import setup_gsi  # noqa: E402
 setup_gsi.install = lambda: None
 setup_gsi.config_matches = lambda: True
 setup_gsi.launch_option_set = lambda: True
+setup_gsi.dota_running = lambda: False
 
 import turbo_tracker as tt  # noqa: E402
 import ui  # noqa: E402

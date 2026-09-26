@@ -185,6 +185,11 @@ def draw_pill(p, rect, text, color, size=11, backing=False):
 # small building blocks
 # ---------------------------------------------------------------------------
 
+def setup_gsi_flag():
+    import setup_gsi
+    return setup_gsi.FLAG
+
+
 def card():
     f = QFrame()
     f.setObjectName("card")
@@ -532,6 +537,9 @@ class MainWindow(QWidget):
         self.banner_text = label("", "bannerText")
         self.banner_text.setWordWrap(True)
         brow.addWidget(self.banner_text, 1)
+        self.banner_copy = button(f"Copy  {setup_gsi_flag()}", "ghost",
+                                  self._copy_flag)
+        brow.addWidget(self.banner_copy)
         self.banner_btn = button("Set up now", "primary", ctl.run_setup)
         brow.addWidget(self.banner_btn)
         self.banner.hide()
@@ -617,13 +625,20 @@ class MainWindow(QWidget):
     def _switch_tab(self, key):
         self.pages.setCurrentIndex(0 if key == "matches" else 1)
 
-    def set_banner(self, text, show_button):
+    def set_banner(self, text, show_button, show_copy=False):
         if not text:
             self.banner.hide()
             return
         self.banner_text.setText(text)
         self.banner_btn.setVisible(show_button)
+        self.banner_copy.setVisible(show_copy)
         self.banner.show()
+
+    def _copy_flag(self):
+        QGuiApplication.clipboard().setText(setup_gsi_flag())
+        self.banner_copy.setText("Copied \u2713  now paste it in Steam")
+        QTimer.singleShot(3000, lambda: self.banner_copy.setText(
+            f"Copy  {setup_gsi_flag()}"))
 
     def set_update(self, version, current):
         if not version:

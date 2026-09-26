@@ -6,6 +6,11 @@ from datetime import datetime
 
 TURBO = 23
 
+# "Turbo only" keeps games whose mode OpenDota hasn't confirmed yet (it
+# takes a few minutes), so a game you just finished doesn't vanish from the
+# list. They drop out only once found to be another mode, or never public.
+TURBO_OR_PENDING = f"(game_mode={TURBO} OR mode_status='pending')"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS matches (
     match_id      TEXT PRIMARY KEY,
@@ -82,7 +87,7 @@ class Store:
 
     @staticmethod
     def _where(turbo_only):
-        return f"WHERE game_mode={TURBO}" if turbo_only else ""
+        return f"WHERE {TURBO_OR_PENDING}" if turbo_only else ""
 
     def matches(self, turbo_only=False, limit=500):
         return self.db.execute(
@@ -97,7 +102,7 @@ class Store:
         return {k: row[k] or 0 for k in row.keys()}
 
     def today_record(self, turbo_only=False):
-        where = "WHERE ended_at>=?" + (f" AND game_mode={TURBO}"
+        where = "WHERE ended_at>=?" + (f" AND {TURBO_OR_PENDING}"
                                        if turbo_only else "")
         row = self.db.execute(
             f"SELECT SUM(won=1) w, SUM(won=0) l FROM matches {where}",

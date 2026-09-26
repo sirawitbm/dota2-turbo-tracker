@@ -32,7 +32,7 @@ from paths import (DATA as LOCAL, DB_PATH, HEROES_CACHE, INSTANCE, PORTRAITS,
                    SETTINGS)
 from store import Store, start_of_today
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 UPDATE_EVERY_MS = 6 * 3600 * 1000   # re-check GitHub for a new release
 
@@ -179,6 +179,9 @@ class Controller:
         self.listen_error = None
         self.server = None
         self._repaired = False
+        self.setup_state = None     # filled in by _check_setup
+        self._dota_seen = None      # when we first saw dota2.exe running
+        self._alerted = set()       # tray notices already shown
         self.update = None          # (version, url) of a newer release
         self.version = __version__
 
@@ -234,6 +237,7 @@ class Controller:
         self._timer(30000, self._check_modes, first=3000)
         self._timer(2000, self._pin)
         self._timer(UPDATE_EVERY_MS, self._check_update, first=5000)
+        self._timer(20000, self._check_setup, first=800)
 
     def _timer(self, interval, fn, first=None):
         t = QTimer(self.app)
@@ -367,35 +371,91 @@ class Controller:
             "gpm": round(h["gpm"] or 0),
         }
 
-    def update_banner(self):
-        text, button = None, False
-        if self.listen_error:
-            text = self.listen_error
-        elif time.time() - self.last_message < 60:
-            text = None          # data is arriving, so the setup works
-        else:
+    # --- setup checks ----------------------------------------------------
+
+    def _check_setup(self):
+        """Every 20 s, off the UI thread (tasklist takes ~0.2 s): is Dota
+        set up to send data, and is it running?"""
+        def work():
             cfg = setup_gsi.config_path()
-            if cfg is None:
-                text = "Couldn't find Dota 2 in your Steam libraries."
-            elif not cfg.exists():
-                text = ("Dota isn't connected to Turbo Tracker yet. Click "
-                        "Set up now to add the connection file.")
-                button = True
-            elif not setup_gsi.config_matches() and not self._repaired:
-                # Our file, written by another copy (source vs exe) with a
-                # different token: rewrite it once, quietly.
-                self._repaired = True
-                try:
-                    setup_gsi.install()
-                    text = ("Updated Dota's connection file for this copy of "
-                            "Turbo Tracker - restart Dota if it's open.")
-                except RuntimeError as err:
-                    text = str(err)
-            elif setup_gsi.launch_option_set() is False:
-                text = ("One step left: in Steam, right-click Dota 2 › "
-                        "Properties › General › Launch Options and "
-                        "add  -gamestateintegration  then restart Dota.")
-        self.window.set_banner(text, button)
+            self.inbox.put(("setup", {
+                "cfg": cfg,
+                "cfg_exists": bool(cfg and cfg.exists()),
+                "cfg_matches": bool(cfg and setup_gsi.config_matches()),
+                "launch": setup_gsi.launch_option_set(),
+                "dota": setup_gsi.dota_running(),
+            }))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _setup_result(self, state):
+        # Count how long Dota has been running without sending anything.
+        if state["dota"]:
+            self._dota_seen = self._dota_seen or time.time()
+        else:
+            self._dota_seen = None
+        self.setup_state = state
+        self.update_banner()
+
+    def update_banner(self):
+        text, button, copy, kind = None, False, False, None
+        state = self.setup_state
+        receiving = time.time() - self.last_message < 60
+        if self.listen_error:
+            text, kind = self.listen_error, "listen"
+        elif receiving or state is None:
+            text = None          # data is arriving, so the setup works
+        elif state["cfg"] is None:
+            text, kind = "Couldn't find Dota 2 in your Steam libraries.", "nodota"
+        elif not state["cfg_exists"]:
+            text = ("Dota isn't connected to Turbo Tracker yet. Click "
+                    "Set up now to add the connection file.")
+            button, kind = True, "setup"
+        elif not state["cfg_matches"] and not self._repaired:
+            # Our file, but written by another copy or an older version:
+            # rewrite it once, quietly.
+            self._repaired = True
+            try:
+                setup_gsi.install()
+                text = ("Updated Dota's connection file for this copy of "
+                        "Turbo Tracker - restart Dota if it's open.")
+            except RuntimeError as err:
+                text = str(err)
+            kind = "repaired"
+        elif state["launch"] is False:
+            text = ("Dota won't send game data yet: it needs a launch option.\n"
+                    "1. In Steam, right-click Dota 2 \u203a Properties \u203a "
+                    "General.\n"
+                    "2. Paste  -gamestateintegration  into Launch Options "
+                    "(use the Copy button).\n"
+                    "3. Restart Dota.\n"
+                    "Just added it? Steam can take a moment to save it - this "
+                    "message goes away on its own.")
+            copy, kind = True, "launch"
+        elif self._dota_seen and time.time() - self._dota_seen > 40:
+            text = ("Dota is running but isn't sending any data. Restart "
+                    "Dota - it only picks up the connection"
+                    + (" and the launch option" if state["launch"] is None
+                       else "") + " when it starts.")
+            kind = "restart"
+        self.window.set_banner(text, button, copy)
+        self._tray_alert(kind, text)
+
+    def _tray_alert(self, kind, text):
+        """Pop a tray notice once per session for problems that stop games
+        being logged - the window may be hidden in the tray or panel."""
+        if not kind or kind in self._alerted or not self.tray:
+            return
+        if kind not in ("setup", "launch", "restart"):
+            return
+        self._alerted.add(kind)
+        title = {"setup": "Turbo Tracker isn't connected to Dota",
+                 "launch": "Dota needs a launch option",
+                 "restart": "Restart Dota to start logging"}[kind]
+        body = {"setup": "Open Turbo Tracker and click Set up now.",
+                "launch": "Add -gamestateintegration to Dota's launch options "
+                          "in Steam. Open Turbo Tracker for the steps.",
+                "restart": "Dota is running but not sending game data yet."}[kind]
+        self.tray.showMessage(title, body, ui.app_icon(), 10000)
 
     def run_setup(self):
         try:
@@ -403,7 +463,7 @@ class Controller:
         except RuntimeError as err:
             self.window.set_banner(str(err), False)
             return
-        self.update_banner()
+        self._check_setup()
 
     def update_status(self):
         live = self.watcher.status()
@@ -484,6 +544,8 @@ class Controller:
                         self.pop_failed.add(hero_id)
                 elif kind == "update":
                     self._update_result(payload)
+                elif kind == "setup":
+                    self._setup_result(payload)
                 elif kind == "mode":
                     self._mode_result(*payload)
                     changed = True

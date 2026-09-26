@@ -7,6 +7,7 @@ Run:  python setup_gsi.py
 """
 
 import json
+import re
 import secrets
 import sys
 import winreg
@@ -80,11 +81,64 @@ def config_path():
     return cfg_dir / "gamestate_integration" / CFG_NAME
 
 
+DOTA_APP_ID = "570"
+FLAG = "-gamestateintegration"
+
+
+def parse_vdf(text):
+    """Valve's KeyValues text format ("key" "value" / "key" { ... }) as
+    nested dicts. Keys are lower-cased; later duplicates win. Tolerant of
+    // comments and anything odd - it only needs to find one value."""
+    tokens = re.findall(r'"((?:[^"\\]|\\.)*)"|([{}])', re.sub(r"//[^\n]*", "", text))
+    root, stack, key = {}, [], None
+    node = root
+    for quoted, brace in tokens:
+        if brace == "{":
+            child = {}
+            if key is not None:
+                node[key.lower()] = child
+            stack.append(node)
+            node, key = child, None
+        elif brace == "}":
+            node = stack.pop() if stack else root
+            key = None
+        elif key is None:
+            key = quoted
+        else:
+            node[key.lower()] = quoted
+            key = None
+    return root
+
+
+def dota_launch_options(localconfig_text):
+    """Dota 2's launch options string from a localconfig.vdf, or None."""
+    data = parse_vdf(localconfig_text)
+    node = data.get("userlocalconfigstore", data)
+    for part in ("software", "valve", "steam", "apps", DOTA_APP_ID):
+        node = node.get(part) if isinstance(node, dict) else None
+        if node is None:
+            return None
+    value = node.get("launchoptions") if isinstance(node, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def _active_steam_user():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Valve\Steam\ActiveProcess")
+        return str(winreg.QueryValueEx(key, "ActiveUser")[0] or "") or None
+    except OSError:
+        return None
+
+
 def launch_option_set():
     """True/False if we can tell from Steam's files, None if we can't.
 
-    Steam keeps each game's launch options in userdata/<id>/config/
-    localconfig.vdf. We only look for the flag; nothing is changed.
+    Steam keeps each game's launch options in userdata/<account>/config/
+    localconfig.vdf. We read Dota 2's (app 570) for the account that's
+    logged in (or, if Steam isn't running, any account on this PC). Read
+    only - nothing is changed. Steam may only save the file a little after
+    you edit the option, or when it closes.
     """
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam")
@@ -92,16 +146,33 @@ def launch_option_set():
     except OSError:
         return None
     files = list((steam / "userdata").glob("*/config/localconfig.vdf"))
-    if not files:
-        return None
-    for f in files:
+    active = _active_steam_user()
+    mine = [f for f in files if f.parts[-3] == active]
+    results = []
+    for f in (mine or files):
         try:
-            if "-gamestateintegration" in f.read_text(encoding="utf-8",
-                                                      errors="ignore"):
-                return True
+            opts = dota_launch_options(f.read_text(encoding="utf-8",
+                                                   errors="ignore"))
         except OSError:
             continue
-    return False
+        if opts is not None:
+            results.append(FLAG in opts.split())
+    if not results:
+        return None
+    return any(results)
+
+
+def dota_running():
+    """Is dota2.exe running? (tasklist, no window.) None if we can't tell."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq dota2.exe", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return "dota2.exe" in out.lower()
 
 
 def ensure_settings():

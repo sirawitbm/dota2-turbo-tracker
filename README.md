@@ -54,6 +54,16 @@ Get-FileHash .\TurboTracker-vX.Y.Z-Setup.exe -Algorithm SHA256
 
 The banner disappears once data starts arriving.
 
+Turbo Tracker checks this for you every 20 seconds and tells you (in the
+window, and once as a tray notice) if something would stop your games
+being logged:
+
+- **Launch option missing** - it reads Dota 2's launch options for the
+  Steam account that's logged in (read only), and shows the steps plus a
+  **Copy** button for `-gamestateintegration`.
+- **Dota running but silent** - usually means Dota was already open when
+  the option or connection file was added: restart Dota.
+
 ## Using it
 
 Leave Turbo Tracker running while you play. The top-right pill shows what
@@ -120,7 +130,8 @@ right-click the tray icon > **Quit**.
 Dota's data doesn't say which mode you're playing. So a few minutes after
 each game, Turbo Tracker looks the match up on
 [OpenDota](https://www.opendota.com) and fills in the mode - until then the
-match says *Checking mode...*. Bot and lobby games aren't on OpenDota; after
+match says *Checking mode...*. **Turbo only** still shows games that are being
+checked, so the game you just finished doesn't vanish from the list. Bot and lobby games aren't on OpenDota; after
 a few hours of trying they become *Practice / lobby* and never count in
 **Turbo only**.
 

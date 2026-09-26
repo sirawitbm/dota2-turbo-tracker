@@ -90,10 +90,14 @@ class StoreTests(unittest.TestCase):
         facts = self.store.hero_facts("npc_dota_hero_pudge")
         self.assertEqual((facts["today"], facts["wins"], facts["losses"]),
                          (2, 1, 1))
-        self.assertEqual(self.store.summary(turbo_only=True)["games"], 0)
+        # not checked yet: still shown under Turbo only
+        self.assertEqual(self.store.summary(turbo_only=True)["games"], 3)
         self.store.set_mode("1", 23, "found")
+        self.store.set_mode("2", 1, "found")            # All Pick: drops out
+        self.store.set_mode("3", None, "not_public")    # bot game: drops out
         self.assertEqual(self.store.summary(turbo_only=True)["games"], 1)
-        self.assertEqual(len(self.store.pending_modes()), 2)
+        self.assertEqual(len(self.store.matches(turbo_only=True)), 1)
+        self.assertEqual(len(self.store.pending_modes()), 0)   # all resolved
 
 
 class BuildTests(unittest.TestCase):
@@ -172,6 +176,52 @@ class BuildTests(unittest.TestCase):
         w.feed(p)
         self.assertTrue(w.status()["paused"])
         self.assertEqual(w.status()["owned"], {"blink", "boots"})
+
+
+class LaunchOptionTests(unittest.TestCase):
+    VDF = '''"UserLocalConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "apps"
+                {
+                    "440"
+                    {
+                        "LaunchOptions"     "-gamestateintegration"
+                    }
+                    "570"
+                    {
+                        "LastPlayed"        "1790000000"
+                        "LaunchOptions"     "%s"
+                    }
+                }
+            }
+        }
+    }
+}
+'''
+
+    def test_reads_dota_only(self):
+        from setup_gsi import dota_launch_options
+        self.assertEqual(dota_launch_options(self.VDF % "-novid -console"),
+                         "-novid -console")
+        # the flag on another game (440) must not count for Dota
+        opts = dota_launch_options(self.VDF % "-novid")
+        self.assertNotIn("-gamestateintegration", opts.split())
+
+    def test_flag_found(self):
+        from setup_gsi import dota_launch_options
+        opts = dota_launch_options(self.VDF % "-novid -gamestateintegration")
+        self.assertIn("-gamestateintegration", opts.split())
+
+    def test_no_dota_block(self):
+        from setup_gsi import dota_launch_options
+        self.assertIsNone(dota_launch_options('"UserLocalConfigStore" { }'))
+        self.assertIsNone(dota_launch_options("garbage {{{"))
 
 
 class UpdateTests(unittest.TestCase):
