@@ -260,6 +260,58 @@ class DeathRecapTests(unittest.TestCase):
         self.assertEqual(w.deaths, [])                # new match: fresh list
 
 
+class ReportTests(unittest.TestCase):
+    ABILITIES = {"abilities": {"pudge_meat_hook": {"name": "Meat Hook",
+                                                   "type": "Pure"},
+                               "lina_laguna_blade": {"name": "Laguna Blade",
+                                                     "type": "Magical"}},
+                 "owner": {"pudge_meat_hook": "npc_dota_hero_pudge",
+                           "lina_laguna_blade": "npc_dota_hero_lina"}}
+    MATCH = {"version": 22, "players": [
+        {"hero_id": 1, "damage_inflictor_received": {"x": 1}},
+        {"hero_id": 8,
+         "damage_inflictor_received": {"null": 1000, "pudge_meat_hook": 400,
+                                       "lina_laguna_blade": 700,
+                                       "mjollnir": 150, "weird_thing": 50},
+         "damage_taken": {"npc_dota_hero_pudge": 900, "npc_dota_hero_lina": 700,
+                          "npc_dota_badguys_tower1_mid": 300},
+         "deaths_log": [{"time": 194, "key": "npc_dota_hero_lina"}]}]}
+
+    def test_report(self):
+        from analysis import build_report, is_parsed
+        self.assertTrue(is_parsed(self.MATCH))
+        r = build_report(self.MATCH, 8, self.ABILITIES)
+        self.assertEqual(r["by_type"], {"Physical": 1000, "Magical": 850,
+                                        "Pure": 400, "Other": 50})
+        self.assertEqual(r["total"], 2300)
+        pudge = next(h for h in r["by_hero"] if h["hero"].endswith("pudge"))
+        self.assertEqual((pudge["spells"], pudge["attacks"]), (400, 500))
+        self.assertEqual(r["other"], 300)                   # the tower
+        self.assertEqual(r["spells"][0]["name"], "Laguna Blade")
+        self.assertEqual(r["deaths"], [{"time": 194,
+                                        "killer": "npc_dota_hero_lina"}])
+        self.assertIsNone(build_report(self.MATCH, 99, self.ABILITIES))
+        self.assertFalse(is_parsed({"players": [{}]}))
+
+    def test_store_queue(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            st = Store(Path(tmp) / "t.db")
+            w = MatchWatcher()
+            m = w.feed(payload("DOTA_GAMERULES_STATE_POST_GAME", "radiant",
+                               match_id="555"))
+            m["ended_at"] = int(__import__("time").time())
+            st.add_match(m)
+            self.assertEqual(st.report("555"), ("none", None))
+            st.save_extras("555", [], {"stunned": 1.5})
+            self.assertEqual(st.report("555"), ("pending", None))
+            self.assertEqual(len(st.pending_reports()), 1)
+            st.set_report("555", "done", {"total": 5})
+            self.assertEqual(st.report("555"), ("done", {"total": 5}))
+            self.assertEqual(st.extras("555")["disables"], {"stunned": 1.5})
+            st.db.close()
+
+
 class UpdateTests(unittest.TestCase):
     def test_version_compare(self):
         from updates import is_newer, parse_version

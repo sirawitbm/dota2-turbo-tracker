@@ -21,6 +21,7 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
+import analysis
 import builds
 import opendota
 import setup_gsi
@@ -32,9 +33,14 @@ from paths import (DATA as LOCAL, DB_PATH, HEROES_CACHE, INSTANCE, PORTRAITS,
                    SETTINGS)
 from store import Store, start_of_today
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 UPDATE_EVERY_MS = 6 * 3600 * 1000   # re-check GitHub for a new release
+
+# When to look for OpenDota's parsed replay after a match (seconds). A parse
+# is requested on the first try and once more later if it isn't there yet.
+REPORT_STEPS = [180, 420, 720, 1080, 1500, 2100, 3000, 4200, 5400]
+REPARSE_AT = (0, 4)
 
 # How long after a match to ask OpenDota for its game mode. Valve publishes
 # matches a few minutes after they end; bot/lobby games never appear.
@@ -180,6 +186,9 @@ class Controller:
         self.server = None
         self._repaired = False
         self.setup_state = None     # filled in by _check_setup
+        self.abilities = None       # OpenDota ability constants (lazy)
+        self.report_in_flight = set()
+        self._notice_match = None   # which match the last tray notice is about
         self._dota_seen = None      # when we first saw dota2.exe running
         self._alerted = set()       # tray notices already shown
         self.update = None          # (version, url) of a newer release
@@ -240,6 +249,10 @@ class Controller:
         self._timer(2000, self._pin)
         self._timer(UPDATE_EVERY_MS, self._check_update, first=5000)
         self._timer(20000, self._check_setup, first=800)
+        self.store.queue_recent_reports()
+        self._timer(60000, self._check_reports, first=15000)
+        if self.tray:
+            self.tray.messageClicked.connect(self._notice_clicked)
 
     def _timer(self, interval, fn, first=None):
         t = QTimer(self.app)
@@ -351,6 +364,7 @@ class Controller:
 
     def _match_row(self, r):
         return {
+            "match_id": r["match_id"],
             "hero_internal": r["hero_internal"],
             "hero": self.hero_name(r["hero_internal"]),
             "subtitle": f"{fmt_when(r['ended_at'])}  ·  {mode_label(r)}",
@@ -372,6 +386,78 @@ class Controller:
             "kda": f"{h['k']:.1f} / {h['d']:.1f} / {h['a']:.1f}",
             "gpm": round(h["gpm"] or 0),
         }
+
+    # --- after-game damage report ----------------------------------------
+
+    def _check_reports(self):
+        now = time.time()
+        for row in self.store.pending_reports():
+            mid, tries = row["match_id"], row["tries"]
+            if mid in self.report_in_flight:
+                continue
+            if row["mode_status"] == "not_public" or not mid.isdigit() \
+                    or tries >= len(REPORT_STEPS):
+                self.store.set_report(mid, "unavailable", tried=False)
+                self._refresh_detail(mid)
+                continue
+            if now >= row["ended_at"] + REPORT_STEPS[tries]:
+                self.report_in_flight.add(mid)
+                threading.Thread(target=self._fetch_report,
+                                 args=(mid, row["hero_id"], tries),
+                                 daemon=True).start()
+
+    def _fetch_report(self, match_id, hero_id, tries):
+        """Background: get the parsed match; ask for a parse if needed."""
+        if self.abilities is None:
+            self.abilities = analysis.load_abilities(LOCAL / "abilities.json")
+        match = analysis.fetch_match(match_id)
+        if analysis.is_parsed(match):
+            report = analysis.build_report(match, hero_id, self.abilities,
+                                           self.items_db)
+            self.inbox.put(("report", (match_id,
+                                       "done" if report else "unavailable",
+                                       report)))
+            return
+        if tries in REPARSE_AT:
+            analysis.request_parse(match_id)
+        self.inbox.put(("report", (match_id, "pending", None)))
+
+    def _report_result(self, match_id, status, report):
+        self.report_in_flight.discard(match_id)
+        self.store.set_report(match_id, status, report)
+        if status == "done" and self.tray:
+            row = self.store.get(match_id)
+            hero = self.hero_name(row["hero_internal"]) if row else "your"
+            self._notice_match = match_id
+            self.tray.showMessage(
+                "Damage report ready",
+                f"{hero} game: see who hit you and with what. Click to open.",
+                ui.app_icon(), 10000)
+        self._refresh_detail(match_id)
+
+    def _notice_clicked(self):
+        if self._notice_match:
+            self.open_match(self._notice_match)
+
+    def _refresh_detail(self, match_id):
+        if self.window.detail.match_id == match_id:
+            self.open_match(match_id, show=False)
+
+    def open_match(self, match_id, show=True):
+        row = self.store.get(match_id)
+        if row is None:
+            return
+        status, report = self.store.report(match_id)
+        self.window.open_match(row, status, report,
+                               self.store.extras(match_id))
+        if show:
+            self.show_window()
+
+    def when(self, ts):
+        return fmt_when(ts)
+
+    def mode_text(self, row):
+        return mode_label(row)
 
     # --- setup checks ----------------------------------------------------
 
@@ -521,6 +607,11 @@ class Controller:
                     match = self.watcher.feed(payload)
                     self._check_new_items()
                     if match and self.store.add_match(match):
+                        extras = match.get("extras") or {}
+                        if match["match_id"].isdigit():
+                            self.store.save_extras(match["match_id"],
+                                                   extras.get("deaths", []),
+                                                   extras.get("disables", {}))
                         changed = True
                         self.show_recap(match["match_id"])
                 elif kind == "heroes":
@@ -553,6 +644,9 @@ class Controller:
                     self._update_result(payload)
                 elif kind == "setup":
                     self._setup_result(payload)
+                elif kind == "report":
+                    self._report_result(*payload)
+                    changed = True
                 elif kind == "mode":
                     self._mode_result(*payload)
                     changed = True

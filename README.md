@@ -119,6 +119,20 @@ right-click the tray icon > **Quit**.
   Dota doesn't share that with outside apps.
 
   ![Death recap: HP falling over 10 seconds with 2 seconds of stuns marked, 3,839 damage taken](docs/death.png)
+- **Match report** - click any game in **Matches**. After a game ends,
+  Turbo Tracker asks OpenDota to analyse its replay; 5-15 minutes later a
+  tray notice says the report is ready. It shows:
+  - the damage you took, split **Physical / Magical / Pure**
+  - how much came **from each enemy hero** (spells vs attacks & items)
+  - the **spells and items that hit you** hardest, with their damage type
+  - **each death: when, and who killed you**, plus the HP graph where the
+    app saw it live
+  - how long you were **stunned, hexed or silenced** in total
+
+  Damage figures cover the whole game (OpenDota doesn't split them per
+  death). Nobody's data says *who* disabled you. Bot and lobby games
+  can't be analysed. Damage types come from OpenDota's spell list; a few
+  items and odd spells show as *Other*.
 - **Finished-item note**: when you complete an item, a small note appears
   on the left where the kill feed is, for 7 seconds: *"Monkey King Bar
   done - Next: Black King Bar, Hurricane Pike, Orchid"*. Also
@@ -163,7 +177,7 @@ a few hours of trying they become *Practice / lobby* and never count in
 Everything stays on your PC: in `%LOCALAPPDATA%\TurboTracker` for the
 installed version, or the `data` folder beside a portable exe. The only
 things sent anywhere are match ids to OpenDota (to look up the mode),
-requests for hero item popularity, downloads of hero and item pictures, and a check of this repo's latest
+requests for hero item popularity, requests to analyse your finished matches, downloads of hero and item pictures, and a check of this repo's latest
 release on GitHub.
 
 To uninstall completely, also delete

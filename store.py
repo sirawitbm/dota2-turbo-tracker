@@ -1,5 +1,6 @@
 """SQLite storage: one row per match."""
 
+import json
 import sqlite3
 import time
 from datetime import datetime
@@ -35,6 +36,21 @@ CREATE TABLE IF NOT EXISTS matches (
     mode_status   TEXT DEFAULT 'pending', -- pending / found / not_public
     mode_tries    INTEGER DEFAULT 0,
     source        TEXT DEFAULT 'gsi'
+);
+
+-- What the app saw live: death recaps and time spent disabled.
+CREATE TABLE IF NOT EXISTS extras (
+    match_id  TEXT PRIMARY KEY,
+    deaths    TEXT,                   -- JSON list of death recaps
+    disables  TEXT                    -- JSON {"stunned": seconds, ...}
+);
+
+-- After-game damage report from OpenDota's parsed replay.
+CREATE TABLE IF NOT EXISTS reports (
+    match_id  TEXT PRIMARY KEY,
+    status    TEXT DEFAULT 'pending', -- pending / done / unavailable
+    tries     INTEGER DEFAULT 0,
+    report    TEXT                    -- JSON from analysis.build_report
 );
 """
 
@@ -126,6 +142,59 @@ class Store:
             "SUM(won=0) losses FROM matches WHERE hero_internal=?",
             (start_of_today(), hero_internal)).fetchone()
         return {k: row[k] or 0 for k in row.keys()}
+
+    # --- live extras and damage reports --------------------------------
+
+    def save_extras(self, match_id, deaths, disables):
+        self.db.execute(
+            "INSERT OR REPLACE INTO extras (match_id, deaths, disables) "
+            "VALUES (?, ?, ?)", (match_id, json.dumps(deaths),
+                                 json.dumps(disables)))
+        self.db.execute("INSERT OR IGNORE INTO reports (match_id) VALUES (?)",
+                        (match_id,))
+        self.db.commit()
+
+    def extras(self, match_id):
+        row = self.db.execute("SELECT * FROM extras WHERE match_id=?",
+                              (match_id,)).fetchone()
+        if not row:
+            return None
+        return {"deaths": json.loads(row["deaths"] or "[]"),
+                "disables": json.loads(row["disables"] or "{}")}
+
+    def report(self, match_id):
+        """(status, report dict or None); status "none" if never queued."""
+        row = self.db.execute("SELECT * FROM reports WHERE match_id=?",
+                              (match_id,)).fetchone()
+        if not row:
+            return "none", None
+        return row["status"], (json.loads(row["report"])
+                               if row["report"] else None)
+
+    def queue_recent_reports(self, max_age_days=2):
+        """Queue damage reports for recent games saved before reports
+        existed (or before this copy saw them)."""
+        since = int(time.time()) - max_age_days * 86400
+        self.db.execute(
+            "INSERT OR IGNORE INTO reports (match_id) SELECT match_id FROM "
+            "matches WHERE ended_at>=? AND mode_status!='not_public'",
+            (since,))
+        self.db.commit()
+
+    def pending_reports(self, max_age_days=2):
+        since = int(time.time()) - max_age_days * 86400
+        return self.db.execute(
+            "SELECT r.match_id, r.tries, m.ended_at, m.hero_id, m.mode_status "
+            "FROM reports r JOIN matches m ON m.match_id = r.match_id "
+            "WHERE r.status='pending' AND m.ended_at>=?", (since,)).fetchall()
+
+    def set_report(self, match_id, status, report=None, tried=True):
+        self.db.execute(
+            "UPDATE reports SET status=?, report=COALESCE(?, report), "
+            "tries=tries+? WHERE match_id=?",
+            (status, json.dumps(report) if report else None, int(tried),
+             match_id))
+        self.db.commit()
 
     def get(self, match_id):
         return self.db.execute("SELECT * FROM matches WHERE match_id=?",

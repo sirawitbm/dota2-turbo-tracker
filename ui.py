@@ -594,7 +594,16 @@ class MainWindow(QWidget):
         self.pages.addWidget(self.matches)
         self.pages.addWidget(self.heroes)
         blay.addWidget(self.pages)
-        root.addWidget(body, 1)
+        # The list card, or one match's report page in its place.
+        from ui_detail import MatchDetail
+        self.views = QStackedWidget()
+        self.views.addWidget(body)
+        self.detail = MatchDetail(ctl, self.close_match)
+        self.views.addWidget(self.detail)
+        root.addWidget(self.views, 1)
+        self.matches.view.clicked.connect(
+            lambda index: ctl.open_match(index.data(Qt.UserRole)["match_id"]))
+        self.matches.view.viewport().setCursor(Qt.PointingHandCursor)
 
         # footer
         foot = QHBoxLayout()
@@ -624,6 +633,15 @@ class MainWindow(QWidget):
 
     def _switch_tab(self, key):
         self.pages.setCurrentIndex(0 if key == "matches" else 1)
+        self.close_match()
+
+    def open_match(self, row, status, report, extras):
+        self.detail.show_match(row, status, report, extras)
+        self.views.setCurrentIndex(1)
+
+    def close_match(self):
+        self.views.setCurrentIndex(0)
+        self.detail.match_id = None
 
     def set_banner(self, text, show_button, show_copy=False):
         if not text:

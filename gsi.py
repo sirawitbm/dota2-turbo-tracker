@@ -102,6 +102,7 @@ class MatchWatcher:
         self.finished_ids = set() # never report the same match twice
         self.history = deque()    # (time, hp, max_hp, disables) samples
         self.deaths = []          # recaps for the current match
+        self.disables = {}        # seconds spent stunned etc. this match
         self._deaths_match = None
         self._was_alive = None
 
@@ -177,6 +178,9 @@ class MatchWatcher:
             "radiant_score": live["radiant_score"],
             "dire_score": live["dire_score"],
             "items": json.dumps(live["items"]),
+            # not columns of the matches table; saved separately
+            "extras": {"deaths": list(self.deaths),
+                       "disables": dict(self.disables)},
         }
 
     def _track_death(self, now, match_id, state, hero):
@@ -185,6 +189,7 @@ class MatchWatcher:
         if match_id != self._deaths_match:
             self._deaths_match = match_id
             self.deaths = []
+            self.disables = {}
             self.history.clear()
             self._was_alive = None
         if state != IN_GAME:
@@ -193,6 +198,10 @@ class MatchWatcher:
         hp, mx = _int(hero.get("health")), _int(hero.get("max_health"))
         if hp is not None and mx:
             flags = frozenset(c for c in CONTROLS if hero.get(c))
+            if self.history and self.history[-1][3]:
+                dt = min(now - self.history[-1][0], 1.0)
+                for c in self.history[-1][3]:
+                    self.disables[c] = round(self.disables.get(c, 0) + dt, 2)
             self.history.append((now, hp, mx, flags))
             while self.history and now - self.history[0][0] > HISTORY_SECONDS:
                 self.history.popleft()
