@@ -1211,6 +1211,203 @@ class TipsCard(QWidget):
                   g.top() + int(g.height() * 0.10))
 
 
+CONTROL_COLORS = {"stunned": "#f5b942", "hexed": "#6fcf6f",
+                  "silenced": "#b48cf2", "disarmed": "#f28c8c",
+                  "muted": "#7fb4f2", "break": "#9aa3b5"}
+
+
+class HpGraph(QWidget):
+    """Your HP over the seconds before death, with a lane per disable."""
+
+    def __init__(self, recap):
+        super().__init__()
+        self.recap = recap
+        lanes = len(recap["controls"])
+        self.setFixedHeight(96 + lanes * 12)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self.recap
+        span = max(3.0, min(12.0, -r["hp"][0][0] if r["hp"] else 3.0))
+        lanes = [c for c in CONTROL_COLORS if c in r["controls"]]
+        w, h = self.width(), 80
+        left, right = 34, w - 6
+
+        def x(t):
+            return left + (right - left) * (1 + t / span)
+
+        # axes / grid
+        p.setPen(QPen(QColor(BORDER), 1))
+        for frac in (0, 0.5, 1):
+            y = 6 + (h - 12) * (1 - frac)
+            p.drawLine(QPoint(left, int(y)), QPoint(right, int(y)))
+        p.setPen(QColor(SUBTLE))
+        p.setFont(font(9))
+        p.drawText(QRect(0, 0, left - 6, 14), Qt.AlignRight, "100%")
+        p.drawText(QRect(0, h - 14, left - 6, 14), Qt.AlignRight, "0")
+        for s in range(0, int(span) + 1, 2):
+            y = h - 2 + len(lanes) * 12
+            if s:
+                p.drawText(QRect(int(x(-s)) - 20, y, 40, 14), Qt.AlignHCenter,
+                           f"-{s}s")
+            else:                        # keep "death" inside the card
+                p.drawText(QRect(right - 44, y, 44, 14), Qt.AlignRight, "death")
+
+        # HP area
+        pts = [(x(t), 6 + (h - 12) * (1 - max(0.0, min(1.0, frac))))
+               for t, frac in r["hp"] if t >= -span]
+        if len(pts) >= 2:
+            path = QPainterPath()
+            path.moveTo(pts[0][0], h - 6)
+            for px, py in pts:
+                path.lineTo(px, py)
+            path.lineTo(pts[-1][0], h - 6)
+            path.closeSubpath()
+            g = QLinearGradient(0, 0, 0, h)
+            g.setColorAt(0, tint(LOSS, 120))
+            g.setColorAt(1, tint(LOSS, 20))
+            p.setPen(Qt.NoPen)
+            p.setBrush(g)
+            p.drawPath(path)
+            line = QPainterPath()
+            line.moveTo(*pts[0])
+            for px, py in pts[1:]:
+                line.lineTo(px, py)
+            p.setPen(QPen(QColor(LOSS), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(line)
+
+        # disable lanes under the graph
+        for i, c in enumerate(lanes):
+            y = h + 2 + i * 12
+            p.setPen(Qt.NoPen)
+            p.setBrush(tint(BORDER, 160))
+            p.drawRoundedRect(QRectF(left, y, right - left, 8), 4, 4)
+            p.setBrush(QColor(CONTROL_COLORS[c]))
+            for flag, t1, t2 in r["bands"]:
+                if flag == c and t2 >= -span:
+                    x1, x2 = x(max(t1, -span)), x(min(t2, 0))
+                    p.drawRoundedRect(QRectF(x1, y, max(3, x2 - x1), 8), 4, 4)
+
+
+class DeathRecapCard(QWidget):
+    """Your latest death, on a hotkey (Ctrl+Shift+D) during a game.
+
+    Built only from what Dota sends about your own hero: HP every 0.1 s and
+    whether you're stunned / silenced / hexed etc. Dota's feed has no damage
+    sources or types, so the card doesn't pretend to know them.
+    Click-through and never takes focus, like the tips card.
+    """
+
+    WIDTH = 560
+    HOTKEY_ID = 0x7444
+    HOTKEY_VK = 0x44            # D  (with Ctrl+Shift)
+    SECONDS = 12
+
+    def __init__(self):
+        super().__init__(None, FLOAT_FLAGS | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFixedWidth(self.WIDTH)
+        self.on_hotkey = None
+        self.hotkey_on = False
+        self.box = QVBoxLayout(self)
+        self.box.setContentsMargins(22, 16, 22, 16)
+        self.box.setSpacing(8)
+        self.body = QWidget()
+        self.box.addWidget(self.body)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        self.hide()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.setBrush(tint(BG, 238))
+        p.drawRoundedRect(r, 16, 16)
+
+    # hotkey: only registered while a game is on (controller decides)
+    def set_hotkey(self, on):
+        if on == self.hotkey_on:
+            return
+        hwnd = int(self.winId())
+        if on:
+            self.hotkey_on = winutil.register_hotkey(hwnd, self.HOTKEY_ID,
+                                                     self.HOTKEY_VK)
+        else:
+            winutil.unregister_hotkey(hwnd, self.HOTKEY_ID)
+            self.hotkey_on = False
+
+    def nativeEvent(self, event_type, message):
+        if winutil.hotkey_id_of(message) == self.HOTKEY_ID and self.on_hotkey:
+            self.on_hotkey()
+            return True, 0
+        return False, 0
+
+    def show_recap(self, recap, number, fmt_clock, pos):
+        self.box.removeWidget(self.body)
+        self.body.deleteLater()
+        self.body = QWidget()
+        lay = QVBoxLayout(self.body)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        head = QHBoxLayout()
+        title = label("\u2620  NO DEATHS YET THIS GAME" if recap is None
+                      else f"\u2620  DEATH {number}  \u00b7  {fmt_clock(recap['clock'])}")
+        title.setStyleSheet(f"color: {LOSS if recap else WIN};"
+                            " font-size: 15px; font-weight: 700;")
+        head.addWidget(title)
+        head.addStretch()
+        if recap:
+            speed = (f"from full HP \u2192 dead in {recap['window']:.1f}s"
+                     if recap["from_pct"] >= 95 else
+                     f"from {recap['from_pct']}% HP \u2192 dead in "
+                     f"{recap['window']:.1f}s")
+            sub = label(speed)
+            sub.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+            head.addWidget(sub)
+        lay.addLayout(head)
+        if recap:
+            lay.addWidget(HpGraph(recap))
+            bits = []
+            for c in CONTROL_COLORS:
+                if c in recap["controls"]:
+                    bits.append(f"<span style='color:{CONTROL_COLORS[c]}'>"
+                                f"\u25a0</span> {c.capitalize()} "
+                                f"{recap['controls'][c]:.1f}s")
+            if not bits:
+                bits.append(f"<span style='color:{SUBTLE}'>No stuns, hexes or "
+                            "silences before this death</span>")
+            legend = QLabel("&nbsp;&nbsp;&nbsp;".join(bits))
+            legend.setTextFormat(Qt.RichText)
+            legend.setStyleSheet("font-size: 12px;")
+            lay.addWidget(legend)
+            per_s = recap["damage"] / recap["window"] if recap["window"] else 0
+            totals = (f"Took {recap['damage']:,} damage in "
+                      f"{recap['window']:.1f}s (\u2248{per_s:,.0f} per second)")
+            if recap["heal"]:
+                totals += f"  \u00b7  healed {recap['heal']:,}"
+            t = label(totals)
+            t.setStyleSheet(f"color: {TEXT}; font-size: 13px;")
+            lay.addWidget(t)
+            note = label("From your HP and disables only - Dota doesn't share "
+                         "which spell hit you.   Ctrl+Shift+D to hide")
+            note.setStyleSheet(f"color: {SUBTLE}; font-size: 10px;")
+            lay.addWidget(note)
+        self.box.addWidget(self.body)
+        self.box.invalidate()
+        self.box.activate()
+        self.adjustSize()
+        self.move(pos(self))
+        self.show()
+        winutil.pin_topmost(int(self.winId()))
+        self._timer.start((self.SECONDS if recap else 3) * 1000)
+
+
 class ItemToast(QWidget):
     """A small note by Dota's kill feed after you finish an item, with the
     next three popular buys. Click-through, never takes focus, gone after

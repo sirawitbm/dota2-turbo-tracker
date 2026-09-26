@@ -224,6 +224,42 @@ class LaunchOptionTests(unittest.TestCase):
         self.assertIsNone(dota_launch_options("garbage {{{"))
 
 
+class DeathRecapTests(unittest.TestCase):
+    def test_summary(self):
+        from gsi import summarize_death
+        S = frozenset({"stunned"})
+        samples = [(0.0, 1000, 1000, frozenset()), (1.0, 1000, 1000, frozenset()),
+                   (1.5, 700, 1000, S), (2.0, 400, 1000, S),
+                   (2.5, 450, 1000, frozenset()), (3.0, 0, 1000, frozenset())]
+        d = summarize_death(samples, clock=600)
+        self.assertEqual(d["clock"], 600)
+        self.assertAlmostEqual(d["window"], 2.0)      # last full HP at t=1.0
+        self.assertEqual(d["damage"], 1000 + 50)      # drops only
+        self.assertEqual(d["heal"], 50)
+        self.assertEqual(d["controls"], {"stunned": 1.0})
+        self.assertEqual(d["from_pct"], 100)
+        self.assertIsNone(summarize_death([], 0))
+
+    def test_watcher_records_deaths(self):
+        w = MatchWatcher()
+        t = 0.0
+        for hp in (900, 900, 500, 100):
+            p = payload("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+            p["hero"].update(health=hp, max_health=900, alive=True,
+                             stunned=hp == 500)
+            w.feed(p, now=t)
+            t += 0.5
+        dead = payload("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+        dead["hero"].update(health=0, max_health=900, alive=False)
+        w.feed(dead, now=t)
+        w.feed(dead, now=t + 0.5)                     # still dead: no new recap
+        self.assertEqual(len(w.deaths), 1)
+        self.assertEqual(w.deaths[0]["controls"], {"stunned": 0.5})
+        nxt = payload("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", match_id="999")
+        w.feed(nxt, now=t + 1)
+        self.assertEqual(w.deaths, [])                # new match: fresh list
+
+
 class UpdateTests(unittest.TestCase):
     def test_version_compare(self):
         from updates import is_newer, parse_version

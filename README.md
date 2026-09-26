@@ -109,6 +109,16 @@ right-click the tray icon > **Quit**.
   to switch Full/Small either way. The shortcut only exists while the
   card is showing, so it doesn't take the keys from Dota the rest of the
   time. Your next death starts at your chosen size again.
+- **Death recap - Ctrl+Shift+D** during a game shows your latest death:
+  your HP over the last seconds, how long you were **stunned, hexed,
+  silenced, disarmed or muted** before dying, and how fast you went from
+  full HP to dead. Press again to hide (it also hides after 12 s).
+  Click-through, like the tips. The shortcut exists only while a game is
+  running. It's built from what Dota sends about your own hero - HP and
+  disables - so it can't show *which* spell hit you or the damage type:
+  Dota doesn't share that with outside apps.
+
+  ![Death recap: HP falling over 10 seconds with 2 seconds of stuns marked, 3,839 damage taken](docs/death.png)
 - **Finished-item note**: when you complete an item, a small note appears
   on the left where the kill feed is, for 7 seconds: *"Monkey King Bar
   done - Next: Black King Bar, Hurricane Pike, Orchid"*. Also

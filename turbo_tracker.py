@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QPoint, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
@@ -210,6 +210,8 @@ class Controller:
         self.tips_flipped = False   # shrunk/grown for this death only
         self._hover_armed = False   # see update_tips
         self.toast = ui.ItemToast(self.item_icon)
+        self.death_card = ui.DeathRecapCard()
+        self.death_card.on_hotkey = self._death_hotkey
         self.owned_seen = (None, set())     # (match id, items last seen)
         self.items_db = None
         self.pops = {}              # hero id -> item popularity
@@ -486,6 +488,11 @@ class Controller:
             color, text = ui.SUBTLE, "Waiting for Dota"
         self.window.status.set(color, text)
         self.update_tips(live, recent)
+        # Ctrl+Shift+D (latest death) exists only while a game is on.
+        in_game = bool(live and recent and live["state"] == LIVE_STATES[0])
+        self.death_card.set_hotkey(in_game)
+        if not in_game and self.death_card.isVisible():
+            self.death_card.hide()
         if self.tray and text != self._tray_tip:
             self._tray_tip = text
             self.tray.setToolTip(("Turbo Tracker\n" + text)[:127])
@@ -651,6 +658,28 @@ class Controller:
                                self.items_db, live["clock"], owned)
         self.toast.show_item(item, builds.next_buys(rec, 3),
                              self.settings["tips"])
+
+    def _death_hotkey(self):
+        """Ctrl+Shift+D: show your latest death this game, or hide it."""
+        if self.death_card.isVisible():
+            self.death_card.hide()
+            return
+        deaths = self.watcher.deaths
+        self.death_card.show_recap(deaths[-1] if deaths else None,
+                                   len(deaths), fmt_duration, self._death_pos)
+
+    def _death_pos(self, card):
+        """Same screen as the tips; below the tips card if it's up."""
+        from PySide6.QtGui import QGuiApplication
+        where = self.settings["tips"]
+        primary = QGuiApplication.primaryScreen()
+        others = [s for s in QGuiApplication.screens() if s is not primary]
+        g = (others[0].availableGeometry() if where == "second" and others
+             else primary.geometry())
+        top = g.top() + int(g.height() * 0.10)
+        if self.tips.isVisible():
+            top = self.tips.geometry().bottom() + 12
+        return QPoint(g.center().x() - card.width() // 2, top)
 
     def _tips_hotkey(self):
         """Ctrl+Shift+T while the card is up: swap Full <-> Small."""
@@ -908,6 +937,7 @@ class Controller:
 
     def quit(self):
         self.quitting = True
+        self.death_card.set_hotkey(False)
         if self.tray:
             self.tray.hide()      # or a dead icon lingers until hovered
         self.tips.hide()

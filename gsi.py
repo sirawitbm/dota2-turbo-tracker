@@ -12,6 +12,53 @@ What the real data looks like (see PLAN.md):
 
 import json
 import time
+from collections import deque
+
+# Disables Dota reports on your own hero, in the order the recap lists them.
+CONTROLS = ("stunned", "hexed", "silenced", "disarmed", "muted", "break")
+HISTORY_SECONDS = 12
+
+
+def summarize_death(samples, clock):
+    """Turn the last seconds of (time, hp, max_hp, flags) samples before a
+    death into a recap. Times in the result are seconds before death.
+
+    Only what Dota sends is used: HP and the disable flags. There is no
+    damage source or type in the data, so none is claimed.
+    """
+    if not samples:
+        return None
+    t_death = samples[-1][0]
+    pts = [(t - t_death, hp, mx, flags) for t, hp, mx, flags in samples]
+    # "From full HP": the last moment HP was at (or within 2% of) max.
+    start_i = 0
+    for i, (_, hp, mx, _) in enumerate(pts):
+        if mx and hp >= 0.98 * mx:
+            start_i = i
+    start_t, start_hp, start_max, _ = pts[start_i]
+    damage = heal = 0
+    for (_, a, _, _), (_, b, _, _) in zip(pts[start_i:], pts[start_i + 1:]):
+        if b < a:
+            damage += a - b
+        else:
+            heal += b - a
+    controls = {c: 0.0 for c in CONTROLS}
+    bands = []                      # (flag, from, to) in seconds before death
+    for (t1, _, _, f1), (t2, _, _, _) in zip(pts, pts[1:]):
+        dt = min(t2 - t1, 1.0)      # a long gap in the feed isn't a disable
+        for c in f1:
+            controls[c] += dt
+            bands.append((c, t1, t1 + dt))
+    return {
+        "clock": clock,
+        "window": -start_t,
+        "from_pct": round(100 * start_hp / start_max) if start_max else 0,
+        "damage": int(damage),
+        "heal": int(heal),
+        "controls": {c: round(v, 1) for c, v in controls.items() if v > 0},
+        "bands": bands,
+        "hp": [(t, hp / mx if mx else 0) for t, hp, mx, _ in pts],
+    }
 
 IN_GAME = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
 PRE_GAME = "DOTA_GAMERULES_STATE_PRE_GAME"
@@ -53,6 +100,10 @@ class MatchWatcher:
     def __init__(self):
         self.live = None          # dict describing the game in progress
         self.finished_ids = set() # never report the same match twice
+        self.history = deque()    # (time, hp, max_hp, disables) samples
+        self.deaths = []          # recaps for the current match
+        self._deaths_match = None
+        self._was_alive = None
 
     def feed(self, data, now=None):
         """Process one message. Returns a finished match dict or None."""
@@ -96,6 +147,8 @@ class MatchWatcher:
             "paused": bool(game_map.get("paused")),
         }
 
+        self._track_death(now, match_id, state, hero)
+
         win_team = game_map.get("win_team") or "none"
         if win_team == "none" or match_id in self.finished_ids:
             return None
@@ -125,6 +178,31 @@ class MatchWatcher:
             "dire_score": live["dire_score"],
             "items": json.dumps(live["items"]),
         }
+
+    def _track_death(self, now, match_id, state, hero):
+        """Keep a rolling HP/disable history; on the moment of death, save
+        a recap of the seconds before it."""
+        if match_id != self._deaths_match:
+            self._deaths_match = match_id
+            self.deaths = []
+            self.history.clear()
+            self._was_alive = None
+        if state != IN_GAME:
+            return
+        alive = bool(hero.get("alive", True))
+        hp, mx = _int(hero.get("health")), _int(hero.get("max_health"))
+        if hp is not None and mx:
+            flags = frozenset(c for c in CONTROLS if hero.get(c))
+            self.history.append((now, hp, mx, flags))
+            while self.history and now - self.history[0][0] > HISTORY_SECONDS:
+                self.history.popleft()
+        if self._was_alive and not alive:
+            recap = summarize_death(list(self.history), self.live["clock"])
+            if recap:
+                self.deaths.append(recap)
+        if not alive:
+            self.history.clear()        # next life starts fresh
+        self._was_alive = alive
 
     def status(self):
         """Short description of what is happening right now, or None."""
